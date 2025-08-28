@@ -1,0 +1,32 @@
+# Developer Notes
+- Implement a symbolic prompt language (SYM-5) using :: tags: r (role), g (goal), c (constraints), s (steps), e (examples), o (output).
+- Support micro-codes such as ^ts (think step-by-step), ^mm (minimal tokens), ^ck (list assumptions), ^rg (reason then answer), ^fx (hedge facts), ^st{N} (N bullet limit), ^md (concise Markdown), ^ps (pseudocode), ^cx (compressed recap), ^qa (Q&A pairs).
+- Provide Bash alias `cx` that expands SYM-5 prompts using a dictionary and sed replacements.
+- Alias workflow: load a dictionary of personas and hints, expand `^st{N}` limits, perform longest-first symbol replacements, build blocks for ::r/::g/::c/::s/::e/::o via awk, and prefix "Follow these instructions exactly.".
+- Wrappers should also normalize comma spacing in constraint and reasoning lists before compression to ensure consistent tokens.
+- Provide PowerShell function `Invoke-Codex` with equivalent expansion logic.
+- PowerShell variant uses an ordered map, regex-based replacements, and a `Get-Block` helper following `$name = ${name}` style.
+- Define algorithmic compression format CX5-ALG v1: `CX5|v=1|Σ=|F=∫(... ⊕ ...)|R=|O=`.
+- Enumerate CX5-ALG operators: ∫ integrate, d[] apply delta constraints, ⊕ add, ⊗ cross/mix, ≈ similarity hint, → output, Π pipeline order, Σ summary request.
+- Design is transport-agnostic; expanded prompts can pipe into any API client.
+- Include decompression spec for ChatGPT so compressed lines can be expanded within each chat session.
+- Decompression spec should output concise Markdown with no preface, infer unknown symbols and ask at most one clarifying question, and return only the expanded instruction.
+- Implement Bash compressor `cx5` and PowerShell `Compress-CX5` to emit CX5 strings.
+- Compressors accept key=value args, normalize comma spacing in hints, build `F` via `∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})`, and emit `CX5|v=1|Σ=|F=...|R=...|O=...`.
+- Differentiate → Integrate compression:
+  - Differentiate: extract role, goal, constraints, reasoning, and output; normalize comma spacing; convert recurring ideas to symbols; stash stray nouns in `R` and format/limits in `O`; skip `Σ` when only built-ins are present.
+  - Integrate: encode the facets as `F=∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})` and attach any `R`/`O` residuals.
+- If a domain recurs, mint a tag (e.g., @domX) and teach it once to keep future prompts short.
+- Handle unknown symbols by inferring safely and asking at most one clarifying question.
+- Wrappers should prompt the user to define unknown symbols, auto-update the on-disk dictionary, and keep future prompts concise.
+- Dictionary management should use LFU/LRU eviction to keep Σ minimal.
+- Maintain concise Markdown output with no extra preface.
+- Future enhancements: per-project dictionaries auto-loaded by folder, short numeric macros (e.g., #42 → policy bundle), adaptive symbol learning that auto-mints domain tags (e.g., @wpsec, @netops), and a dry-run token estimator that compares compressed vs uncompressed sizes before sending.
+- Token estimator should be available via a `--estimate` CLI flag to report token counts without submitting prompts.
+- Estimator should output both raw and compressed counts with a percentage savings report.
+- Estimator should also log raw/compressed counts and percentage savings under `~/.cx/metrics` for per-project tracking.
+- Add a `--dry` flag to preview the expanded instruction without calling the API, useful for debugging.
+- Provide a cross-platform install script that configures aliases, seeds a default dictionary, and drops the decompression spec.
+- Installer should be idempotent, create `~/.cx` plus a `metrics` subdirectory, and verify assets on repeated runs.
+- When expanding shell variables, preserve style such as `$name` → `${name}`.
+- Reference end-to-end usage: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
