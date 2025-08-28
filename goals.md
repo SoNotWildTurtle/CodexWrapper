@@ -1,0 +1,15 @@
+# Goals
+- Build codex wrapper application supporting SYM-5 and CX5-ALG compression.
+- Implement Bash alias `cx` and `cx5` along with PowerShell `Invoke-Codex` and `Compress-CX5` functions.
+- Add per-project dictionaries auto-loaded by folder and support for numeric macros (e.g., #42 → policy bundles).
+- Create a dry-run token estimator comparing compressed versus uncompressed prompts to preview savings before sending, exposed via a `--estimate` flag.
+- Provide a `--dry` option to preview the expanded prompt without sending it to the model.
+- Implement adaptive symbol learning that auto-mints domain tags like @wpsec or @netops.
+- Provide an automated Codex install script that configures aliases, seeds a default dictionary, and installs the decompression spec.
+- Track token savings metrics per project.
+- Implement LFU/LRU dictionary eviction for custom symbols to keep Σ minimal.
+- Add a clarifying-question mechanism to handle unknown symbols safely and update the dictionary automatically.
+- Ensure the token estimator reports raw vs compressed counts and percentage savings without calling the API.
+- Make the install script idempotent and drop assets in a standard `~/.cx` directory.
+- Persist token-savings logs under `~/.cx/metrics` for project-level tracking.
+- Normalize comma spacing in constraint and reasoning lists before compression for deterministic tokens.

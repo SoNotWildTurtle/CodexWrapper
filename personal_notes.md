@@ -1,0 +1,27 @@
+# Personal Notes
+- Maintain a small, reusable dictionary of symbols for frequent domains and reasoning hints.
+- Keep prompts concise; leverage micro-codes and tags instead of verbose instructions.
+- Expand the dictionary as new projects require custom roles or hints.
+- Experiment with auto-loaded per-project dictionaries and short numeric macros (e.g., #42 → policy bundle).
+- Build a dry-run token estimator to measure savings before sending prompts.
+- Try adaptive symbol learning to auto-mint new domain codes.
+- Consider building tools for tracking token savings and managing per-project symbols.
+- Use the `--estimate` flag to preview token counts and `--dry` to inspect expanded prompts before sending.
+- Capture both raw and compressed token counts and note percentage savings.
+- Apply a Differentiate → Integrate workflow when encoding prompts.
+- Convert recurring concepts to symbols first; stash leftover nouns in `R` and output limits in `O`.
+- Use LFU/LRU strategies to keep the dictionary trim.
+- If a symbol is unfamiliar, infer meaning and ask one clarifying question at most.
+- Reuse the expander spec across chats and keep instruction blocks short.
+- Wrappers expand `^st{N}`, perform longest-first replacements, and prepend "Follow these instructions exactly.".
+- Auto-mint domain tags like @wpsec or @netops when patterns recur.
+- Compare compressed vs uncompressed token counts to verify savings.
+- Follow shell variable style `$name = ${name}` when crafting examples.
+- Normalize commas in constraint and reasoning lists before compression.
+- Test the full cx5 pipeline with command: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
+- Verify the install script sets up aliases, a starter dictionary, and the decompression spec across Bash and PowerShell.
+- Ensure the installer is idempotent and writes assets to a standard `~/.cx` directory.
+- Prompt users to define unknown symbols so the dictionary stays current.
+- Log percentage savings from `--estimate` for each project.
+- Run the installer multiple times to confirm idempotency on different platforms and check that `~/.cx/metrics` is seeded.
+- Verify `--estimate` logs appear under `~/.cx/metrics` with raw/compressed counts and savings percent.
