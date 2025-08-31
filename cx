@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE' >&2
+Usage: cx role=VALUE goal=VALUE [cons=VAL] [reason=VAL] [out=VAL] [raw=VAL] [--estimate] [--dry]
+USAGE
+}
+
+ESTIMATE=false
+DRY=false
+ARGS=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --estimate)
+      ESTIMATE=true
+      ;;
+    --dry)
+      DRY=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      ARGS+=("$arg")
+      ;;
+  esac
+done
+
+ROLE=""
+GOAL=""
+CONS=""
+REASON=""
+OUT=""
+RAW=""
+
+for pair in "${ARGS[@]}"; do
+  key="${pair%%=*}"
+  value="${pair#*=}"
+  case "$key" in
+    role) ROLE="$value" ;;
+    goal) GOAL="$value" ;;
+    cons|constraints) CONS="$value" ;;
+    reason|reasons) REASON="$value" ;;
+    out|output) OUT="$value" ;;
+    raw|R) RAW="$value" ;;
+    *) echo "Unknown arg: $key" >&2 ;;
+  esac
+done
+
+if [[ -z "$ROLE" || -z "$GOAL" ]]; then
+  usage
+  exit 1
+fi
+
+if $ESTIMATE; then
+  DRY=true
+fi
+
+# Load dictionary entries from $HOME/.cx/dict and ./.cx/dict
+declare -A DICT
+load_dict() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    DICT["$k"]="$v"
+  done < "$file"
+}
+
+load_dict "$HOME/.cx/dict"
+load_dict ".cx/dict"
+
+# Keep project dictionary to most recent 100 entries (LRU)
+prune_dict() {
+  local file="$1"
+  local max=100
+  [[ -f "$file" ]] || return 0
+  local lines=$(wc -l < "$file")
+  if (( lines > max )); then
+    tail -n "$max" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  fi
+}
+
+# Expand ^st{N} to ^stN before symbol checks
+global_expand_st() {
+  printf '%s' "$1" | sed -E 's/\^st\{([0-9]+)\}/^st\1/g'
+}
+ROLE=$(global_expand_st "$ROLE")
+GOAL=$(global_expand_st "$GOAL")
+CONS=$(global_expand_st "$CONS")
+REASON=$(global_expand_st "$REASON")
+OUT=$(global_expand_st "$OUT")
+RAW=$(global_expand_st "$RAW")
+
+# Fold raw terms into goal or constraints
+if [[ -n "$RAW" ]]; then
+  IFS=';' read -ra RAW_PARTS <<< "$RAW"
+  for part in "${RAW_PARTS[@]}"; do
+    part=$(printf '%s' "$part" | xargs)
+    case "$part" in
+      g:*|goal:*)
+        part=${part#*:}
+        GOAL="${GOAL}${GOAL:+, }$part"
+        ;;
+      c:*|cons:*)
+        part=${part#*:}
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+      *)
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+    esac
+  done
+fi
+
+# Normalize comma spacing early for deterministic tokens
+global_norm_commas() {
+  printf '%s' "$1" | sed -E 's/ *, */,/g; s/,/, /g'
+}
+CONS=$(global_norm_commas "$CONS")
+REASON=$(global_norm_commas "$REASON")
+GOAL=$(global_norm_commas "$GOAL")
+
+# Auto-mint domain tags for repeated phrases
+auto_mint_tags() {
+  local text="$1"
+  local lower=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')
+  local repeats=$(printf '%s' "$lower" |
+    tr -s ' ' '\n' |
+    awk '{w[NR]=$0} END{for(i=1;i<NR;i++){p=w[i]" "w[i+1];c[p]++} for(p in c) if(c[p]>1) print p}')
+  mapfile -t phrases <<< "$repeats"
+  for phrase in "${phrases[@]}"; do
+    [[ -z "$phrase" ]] && continue
+    local found=0
+    for val in "${DICT[@]}"; do
+      if [[ "$val" == "$phrase" ]]; then
+        found=1
+        break
+      fi
+    done
+    [[ $found -eq 1 ]] && continue
+    read -p "Mint tag for \"$phrase\"? Enter @tag or blank to skip: " tag
+    if [[ $tag == @* ]]; then
+      mkdir -p .cx
+      echo "$tag=$phrase" >> .cx/dict
+      prune_dict .cx/dict
+      DICT["$tag"]="$phrase"
+    fi
+  done
+}
+
+auto_mint_tags "$ROLE $GOAL $CONS $REASON $OUT"
+
+# Prompt for undefined symbols and numeric macros and persist them
+symbols=$(printf '%s %s %s %s %s' "$ROLE" "$GOAL" "$CONS" "$REASON" "$OUT" | grep -oE '[@^#][A-Za-z0-9_]+' | sort -u)
+for sym in $symbols; do
+  if [[ -z "${DICT[$sym]+x}" ]]; then
+    read -p "Define $sym: " def
+    if [[ -n "$def" ]]; then
+      mkdir -p .cx
+      echo "$sym=$def" >> .cx/dict
+      prune_dict .cx/dict
+      DICT["$sym"]="$def"
+    fi
+  fi
+done
+
+# Sort keys by length for longest-first replacements
+set +u
+if [ ${#DICT[@]} -gt 0 ]; then
+  sorted_keys=$(printf '%s\n' "${!DICT[@]}" | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-)
+else
+  sorted_keys=""
+fi
+set -u
+
+replace_dict() {
+  local text="$1"
+  for k in $sorted_keys; do
+    v="${DICT[$k]}"
+    esc_k=$(printf '%s' "$k" | sed -e 's/[.[\\*^$&/]/\\&/g')
+    text=$(printf '%s' "$text" | sed -e "s/$esc_k/$v/g")
+  done
+  printf '%s' "$text"
+}
+
+ROLE=$(replace_dict "$ROLE")
+GOAL=$(replace_dict "$GOAL")
+CONS=$(replace_dict "$CONS")
+REASON=$(replace_dict "$REASON")
+OUT=$(replace_dict "$OUT")
+
+prompt="Follow these instructions exactly.\n::r $ROLE\n::g $GOAL"
+[[ -n "$CONS" ]] && prompt+=$'\n'"::c $CONS"
+[[ -n "$REASON" ]] && prompt+=$'\n'"::s $REASON"
+[[ -n "$OUT" ]] && prompt+=$'\n'"::o $OUT"
+
+if $ESTIMATE; then
+  raw_tokens=$(printf '%s' "$prompt" | wc -w | tr -d ' ')
+  compressed_tokens=$(printf '%s %s %s %s %s' "$ROLE" "$GOAL" "$CONS" "$REASON" "$OUT" | wc -w | tr -d ' ')
+  if [ "$raw_tokens" -gt 0 ]; then
+    savings=$(( (raw_tokens - compressed_tokens) * 100 / raw_tokens ))
+  else
+    savings=0
+  fi
+  echo "raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >&2
+  mkdir -p "$HOME/.cx/metrics"
+  project=$(basename "$(pwd)")
+  timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+  echo "[$timestamp] raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >> "$HOME/.cx/metrics/$project.log"
+fi
+
+echo -e "$prompt"
+
+if ! $DRY; then
+  echo "(no API call implemented)" >&2
+fi
+

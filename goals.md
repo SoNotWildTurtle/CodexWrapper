@@ -1,0 +1,25 @@
+# Goals
+- Build codex wrapper application supporting SYM-5 and CX5-ALG compression.
+- Implement Bash alias `cx` and `cx5` along with PowerShell `Invoke-Codex` and `Compress-CX5` functions. *(DONE)*
+- Ensure alias replacements escape special characters and sort by key length to avoid partial overlaps.
+- Add per-project dictionaries auto-loaded by folder and support for numeric macros (e.g., #42 → policy bundles). *(DONE)*
+- Create a dry-run token estimator comparing compressed versus uncompressed prompts to preview savings before sending, exposed via a `--estimate` flag. *(DONE)*
+- Provide a `--dry` option to preview the expanded prompt without sending it to the model. *(DONE)*
+- Implement adaptive symbol learning that auto-mints domain tags like @wpsec or @netops. *(DONE)*
+- Provide an automated Codex install script that configures aliases, seeds a default dictionary, and installs the decompression spec. *(DONE)*
+- Installer should drop the decompression spec into `~/.cx` for easy reuse across chats.
+- Track token savings metrics per project. *(DONE)*
+- Implement LFU/LRU dictionary eviction for custom symbols to keep Σ minimal. *(LRU DONE)*
+- Add a clarifying-question mechanism to handle unknown symbols safely and update the dictionary automatically. *(DONE)*
+- Ensure the token estimator reports raw vs compressed counts and percentage savings without calling the API.
+- Make the install script idempotent and drop assets in a standard `~/.cx` directory.
+- Persist token-savings logs under `~/.cx/metrics` for project-level tracking.
+- Derive the metrics filename from the current directory so each project logs to its own `<project>.log`.
+- Normalize comma spacing in constraint and reasoning lists before compression for deterministic tokens. *(DONE)*
+- Allow combining `--estimate` with `--dry` to preview expanded prompts and token metrics simultaneously. *(DONE)*
+- Append timestamped token-savings entries to `~/.cx/metrics/<project>.log` for historical tracking. *(DONE)*
+- Standardize each metrics entry as `[ISO timestamp] raw=X compressed=Y savings=Z%` for easy consumption. *(DONE)*
+- Each logged entry should capture raw and compressed counts along with the percentage savings. *(DONE)*
+- Ensure the installer preserves existing dictionary entries while verifying required assets and creating a metrics subdirectory. *(DONE)*
+- Persist auto-minted domain tags to dictionaries so they can be reused across sessions. *(DONE)*
+- Teach the decompressor to fold any `R` raw terms into goal or constraint sections during expansion. *(DONE)*
