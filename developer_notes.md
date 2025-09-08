@@ -1,0 +1,75 @@
+# Developer Notes
+- Implement a symbolic prompt language (SYM-5) using :: tags: r (role), g (goal), c (constraints), s (steps), e (examples), o (output).
+- Support micro-codes such as ^ts (think step-by-step), ^mm (minimal tokens), ^ck (list assumptions), ^rg (reason then answer), ^fx (hedge facts), ^st{N} (N bullet limit), ^md (concise Markdown), ^ps (pseudocode), ^cx (compressed recap), ^qa (Q&A pairs).
+- Include domain shorthands like @sec, @ds, and @dev to compress recurring personas; allow the dictionary to extend this set.
+- Support numeric macros like `#42` to expand policy bundles or other presets via dictionary entries.
+- Provide Bash alias `cx` that expands SYM-5 prompts using a dictionary and sed replacements.
+- Provide Bash compressors/aliases `cx` (expand) and `cx5` (compress to CX5) using dictionary-based replacements.
+- `cx5` inverts dictionaries from `$HOME/.cx/dict` and `./.cx/dict`, replaces phrases with symbols longest-first, normalizes commas,
+  expands `^st{N}` to `^stN`, and emits `CX5|v=1|Σ=|F=∫(...)|R=|O=`.
+- Alias workflow: load a dictionary of personas and hints, expand `^st{N}` limits, sort keys by length for longest-first replacements, escape sed special characters, build blocks for ::r/::g/::c/::s/::e/::o via awk, and prefix "Follow these instructions exactly.".
+- Wrappers should also normalize comma spacing in constraint and reasoning lists before compression to ensure consistent tokens.
+- Provide PowerShell function `Invoke-Codex` with equivalent expansion logic (see `Invoke-Codex.ps1`).
+- PowerShell variant uses an ordered map, regex-based replacements, and a `Get-Block` helper following `$name = ${name}` style.
+- Define algorithmic compression format CX5-ALG v1: `CX5|v=1|Σ=|F=∫(... ⊕ ...)|R=|O=`.
+- Enumerate CX5-ALG operators: ∫ integrate, d[] apply delta constraints, ⊕ add, ⊗ cross/mix, ≈ similarity hint, → output, Π pipeline order, Σ summary request.
+- Design is transport-agnostic; expanded prompts can pipe into any API client.
+- Include decompression spec for ChatGPT so compressed lines can be expanded within each chat session.
+- Decompression spec should output concise Markdown with no preface, infer unknown symbols and ask at most one clarifying question, and return only the expanded instruction.
+- If `R` is present, fold raw terms into the goal or constraints during decompression.
+- The Bash `cx` wrapper accepts an optional `raw=` parameter and folds those raw terms into the goal or constraint sections before expansion.
+- Implement Bash compressor `cx5` and PowerShell `Compress-CX5` to emit CX5 strings (see `Compress-CX5.ps1`).
+- PowerShell `Compress-CX5` validates that `role` and `goal` are provided, normalizes comma spacing with `-replace`, builds the `F` string, and returns the single-line `CX5|...` output.
+- Compressors accept key=value args, normalize comma spacing in hints, build `F` via `∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})`, and emit `CX5|v=1|Σ=|F=...|R=...|O=...`.
+- Differentiate → Integrate compression:
+  - Differentiate: extract role, goal, constraints, reasoning, and output; normalize comma spacing; convert recurring ideas to symbols; stash stray nouns in `R` and format/limits in `O`; skip `Σ` when only built-ins are present.
+  - Integrate: encode the facets as `F=∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})` and attach any `R`/`O` residuals.
+- If a domain recurs, mint a tag (e.g., @domX) and teach it once to keep future prompts short.
+- Handle unknown symbols by inferring safely and asking at most one clarifying question.
+- Wrappers should prompt the user to define unknown symbols, auto-update the on-disk dictionary, and keep future prompts concise.
+- Wrappers auto-mint domain tags by detecting repeated plain phrases and offering `@tag` definitions so recurring concepts compress well.
+- Project dictionaries track usage counts; `cx` reports top and least-used symbols, average use, and how many entries remain unused.
+- If `CX_DICT_MAX` is set and exceeded, the wrapper performs a dynamic analysis, shows usage statistics, and lets the user choose how many entries to keep—no hard limit is enforced.
+- After each run, `cx` prints a short report of the most and least-used symbols to aid contextual analysis.
+- A `--dict` flag prints the combined global and project dictionary with usage counts for quick inspection.
+- Maintain concise Markdown output with no extra preface.
+- Future enhancements: adaptive symbol learning that auto-mints domain tags (e.g., @wpsec, @netops).
+- Token estimator should be available via a `--estimate` CLI flag to report token counts without submitting prompts.
+- Estimator should output both raw and compressed counts with a percentage savings report.
+- Estimator should also log raw/compressed counts and percentage savings under `~/.cx/metrics` for per-project tracking.
+- Estimator uses the `tiktoken` tokenizer when available for accurate counts and falls back to simple word splits otherwise.
+- Add a `--dry` flag to preview the expanded instruction without calling the API, useful for debugging.
+- Wrappers should validate that `role` and `goal` are provided; print a usage message otherwise.
+- `--estimate` implies a dry-run so token counts can be previewed without sending the prompt.
+- Provide a cross-platform install script that configures aliases, seeds a default dictionary, and drops the decompression spec.
+- Supply an `install_venv.sh` helper for WSL/Kali that installs wrappers into the active Python virtual environment and seeds `.cx` assets locally.
+- When invoking PowerShell installers, fall back to `powershell` if `pwsh` isn't available and prompt users to install PowerShell when neither command exists.
+- Installer should be idempotent, create `~/.cx` plus a `metrics` subdirectory, and verify assets on repeated runs.
+- Installer should place the decompression spec under `~/.cx` so users can paste it into new chats.
+- When expanding shell variables, preserve style such as `$name` → `${name}`.
+- Reference end-to-end usage: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
+- Token estimator should append timestamped entries to `~/.cx/metrics/<project>.log` so savings history is preserved.
+- Each metrics entry should record the timestamp, raw count, compressed count, and percentage savings for auditing.
+- The estimator should derive the `<project>` name from the current working directory when logging metrics.
+- Metrics logs should follow a readable format like `[2025-08-29T12:00Z] raw=123 compressed=45 savings=63%` for easy parsing.
+- When expanding prompts, log the final text of each symbol to `~/.cx/context/<symbol>.log` so its usage context accumulates over time.
+- Log co-occurring symbol triads (drawn from up to nine symbols) to `~/.cx/relations` each run and print the most frequent triads to highlight emerging compound tags, mimicking quantum-like pairing.
+- When a relation triad exceeds `CX_REL_SUGGEST` (default 3) uses, prompt the user to mint a combined `@tag` from the triad's phrases so compound concepts can be reused.
+- Maintain a neuron-style grid per project under `~/.cx/grid/<project>.grid` where each symbol sits at the center of a 3×3 block and records up to eight neighboring symbols so contextual relationships grow like connected neurons.
+- Tag runs with `topic=` to map symbols to `~/.cx/topics/<topic>.log`, growing relational meaning between symbols and themes.
+- `--estimate` may be combined with `--dry` to show token counts alongside the expanded instruction without hitting the API.
+- Installer must avoid clobbering existing dictionaries and verify required assets before overwriting.
+- Auto-minted domain tags (e.g., @domX) should be persisted to the dictionary for reuse across sessions.
+- Wrappers may auto-load a `.cx/dict` file from the current project folder to supply domain-specific symbols automatically and honor numeric macros like `#42` defined in those dictionaries.
+- If the API key is missing, `--offline` is specified, or the network call fails, queue the prompt under `~/.cx/offline/<project>/<timestamp>.txt` so work can continue offline.
+- A `--replay` flag should send and remove queued prompts from project folders beneath `~/.cx/offline` once an API key is available.
+- Offline queues store prompts per project so ideas accumulate and can be replayed later to nurture long-term growth.
+- Periodically review offline prompt queues and `~/.cx/context` logs to identify recurring phrases and mint new symbols for continued expansion.
+- After each API response, append the reply to `~/.cx/responses/<project>.log`. At startup and after new replies, scan the entire log for recurring phrases and offer to mint new `@tag` definitions so the dictionary grows from Codex feedback over time.
+- Append every expanded prompt to `~/.cx/prompts/<project>.log` and scan it across runs for repeated phrases so personal instructions can become reusable tags.
+
+- When `OPENAI_API_KEY` isn't set, wrappers should prompt for it, export the key for the session, and then perform the API call, reporting HTTP errors back to the user.
+- The `cx5` compressor folds `raw=` fragments (e.g. `g:foo`, `c:bar`) into the goal or constraint lists before symbol replacement so CX5 strings encode those directives.
+
+- `install.sh` seeds `~/.cx` with a starter dict, metrics folder, and decompression spec, then installs `cx` to `~/.local/bin`.
+- When not in `--dry` mode, wrappers post the expanded prompt to OpenAI's `chat/completions` endpoint using `OPENAI_API_KEY` and print the model reply.
