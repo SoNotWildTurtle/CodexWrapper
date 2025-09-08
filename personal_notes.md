@@ -1,0 +1,67 @@
+# Personal Notes
+- Maintain a small, reusable dictionary of symbols for frequent domains and reasoning hints.
+- Keep prompts concise; leverage micro-codes and tags instead of verbose instructions.
+- Expand the dictionary as new projects require custom roles or hints.
+- Practice using domain shorthands like @sec, @ds, and @dev to keep prompts tiny.
+- Leverage auto-loaded per-project dictionaries and use numeric macros like #42 for policy bundles.
+- Build a dry-run token estimator to measure savings before sending prompts.
+- Try adaptive symbol learning to auto-mint new domain codes.
+- Consider building tools for tracking token savings and managing per-project symbols.
+- Use the `--estimate` flag to preview token counts and `--dry` to inspect expanded prompts before sending.
+- Remember that `--estimate` implies `--dry` so token counts never trigger an API call.
+- Always provide both `role=` and `goal=`; the wrapper errors out otherwise.
+- Capture both raw and compressed token counts and note percentage savings.
+- Apply a Differentiate → Integrate workflow when encoding prompts.
+- Convert recurring concepts to symbols first; stash leftover nouns in `R` and output limits in `O`.
+- Fold any `R` raw terms back into the goal or constraints when decompressing prompts.
+- When pruning, use LFU with an LRU fallback to drop the stalest entries.
+- Pruning is optional: `CX_DICT_MAX` merely hints a limit. When exceeded, review usage statistics and choose how many entries to keep; counts live in `.cx/usage`.
+- Review the top symbol report after each run to spot new compression opportunities.
+- Run `cx --dict` to view all symbols with usage counts and monitor dictionary growth.
+- If a symbol is unfamiliar, infer meaning and ask one clarifying question at most.
+- Reuse the expander spec across chats and keep instruction blocks short.
+- Wrappers expand `^st{N}`, perform longest-first replacements, and prepend "Follow these instructions exactly.".
+- Double-check that replacements escape special characters and favor longest matches to avoid partial overlaps.
+- Auto-mint domain tags like @wpsec or @netops when patterns recur, then reuse them to keep prompts short.
+- Compare compressed vs uncompressed token counts to verify savings.
+- Ensure the `tiktoken` library is installed so `--estimate` reports accurate token counts.
+- Follow shell variable style `$name = ${name}` when crafting examples.
+- Normalize commas in constraint and reasoning lists before compression.
+- Test the full cx5 pipeline with command: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
+- Test the full cx5 pipeline and ensure dictionary phrases convert back to symbols correctly.
+- Verify the install script sets up aliases, a starter dictionary, and the decompression spec across Bash and PowerShell.
+- Ensure the installer is idempotent and writes assets to a standard `~/.cx` directory.
+- When working in WSL/Kali, activate the Python venv and run `install_venv.sh` so wrappers and `.cx` assets live inside the environment.
+- Prompt users to define unknown symbols so the dictionary stays current.
+- Log percentage savings from `--estimate` for each project.
+- Run the installer multiple times to confirm idempotency on different platforms and check that `~/.cx/metrics` is seeded.
+- Verify `--estimate` logs appear under `~/.cx/metrics` with raw/compressed counts and savings percent.
+- Ensure each metrics log is named after the current directory so project histories stay separate.
+- Log each `--estimate` run to `~/.cx/metrics/<project>.log` with a timestamp and percentage savings.
+- Keep the decompression spec stored in `~/.cx` handy to seed new chats quickly.
+- Double-check metrics logs include timestamp, raw count, compressed count, and percent savings.
+- Format each entry like `[2025-08-29T12:00Z] raw=123 compressed=45 savings=63%` so parsing is straightforward.
+- Pair `--dry` with `--estimate` when debugging to inspect expanded prompts and counts without sending.
+- After clarifying an unknown symbol, save the definition so the dictionary stays current.
+- Verify the installer skips overwriting existing dictionary entries and confirms `~/.cx/metrics` exists.
+- Keep a project-level `.cx/dict` so symbols auto-load whenever I enter the folder.
+- Review `~/.cx/context` logs to understand how symbols are used and refine definitions for clearer prompts.
+- Check `~/.cx/relations` to see which symbol triads (quantum-like pairings up to nine symbols) co-occur most and consider minting compound tags.
+- Review `~/.cx/grid/<project>.grid` periodically to see how symbols cluster around each other in 3×3 neuron blocks and refine definitions based on those relationships.
+- When the wrapper suggests a tag from a frequent symbol triad, evaluate and add it to the dictionary if it captures a reusable concept.
+- Use `topic=` to tag runs and review `~/.cx/topics` logs to see how symbols cluster by theme.
+- After each run, peek at `~/.cx/responses/<project>.log`. The wrapper mines this log for recurring phrases, but review it to confirm and mint tags so the dictionary keeps growing.
+- Every prompt is recorded under `~/.cx/prompts/<project>.log` and scanned across runs; revisit it to identify recurring instructions worth symbolizing.
+
+- Set `OPENAI_API_KEY` before running without `--dry` so the wrappers can reach OpenAI and return a reply.
+
+- If the API key isn't set, be ready to enter it when prompted; the wrapper will export it for the current session.
+- Remember that `cx5` now folds `raw=` fragments into goals or constraints before compression.
+
+- If working offline or skipping the key, use `--offline` or press Enter at the key prompt; the wrapper will queue the prompt under `~/.cx/offline/<project>` for later.
+- Once a key is available, run `cx --replay` to send any queued prompts across project folders and clear the offline queue.
+- Review queued prompts under `~/.cx/offline` and the per-symbol context logs to grow and refine the dictionary over time.
+
+- Use `install.sh` to set up `cx` and seed `~/.cx` assets before first use.
+- If `pwsh` isn't available, try `powershell -File install.ps1`; if neither exists, install PowerShell from Microsoft's docs.
+- Usage reports now include averages and unused counts—review them after each run and only prune when explicitly confirmed; the dictionary can grow unless `CX_DICT_MAX` is set as a hint.

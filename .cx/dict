@@ -1,0 +1,6 @@
+@dev=You are a seasoned developer.
+^mm=Use minimal tokens; compress phrasing, keep meaning.
+^ts=Think step-by-step and verify each step.
+^st3=Provide at most 3 bullet points.
+#42=policy bundle
+@wpsec=web platform security
