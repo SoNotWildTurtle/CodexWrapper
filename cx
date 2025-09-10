@@ -1,0 +1,638 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE' >&2
+Usage: cx role=VALUE goal=VALUE [cons=VAL] [reason=VAL] [out=VAL] [raw=VAL] [topic=VAL] [--estimate] [--dry] [--offline] [--replay] [--dict] [--metrics] [--grid]
+USAGE
+}
+
+ESTIMATE=false
+DRY=false
+OFFLINE=false
+REPLAY=false
+SHOW_DICT=false
+SHOW_METRICS=false
+SHOW_GRID=false
+ARGS=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --estimate)
+      ESTIMATE=true
+      ;;
+    --dry)
+      DRY=true
+      ;;
+    --offline)
+      OFFLINE=true
+      ;;
+    --replay)
+      REPLAY=true
+      ;;
+    --dict)
+      SHOW_DICT=true
+      ;;
+    --metrics)
+      SHOW_METRICS=true
+      ;;
+    --grid)
+      SHOW_GRID=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      ARGS+=("$arg")
+      ;;
+  esac
+done
+
+ROLE=""
+GOAL=""
+CONS=""
+REASON=""
+OUT=""
+RAW=""
+TOPICS=""
+project=$(basename "$(pwd)")
+
+for pair in "${ARGS[@]}"; do
+  key="${pair%%=*}"
+  value="${pair#*=}"
+  case "$key" in
+    role) ROLE="$value" ;;
+    goal) GOAL="$value" ;;
+    cons|constraints) CONS="$value" ;;
+    reason|reasons) REASON="$value" ;;
+    out|output) OUT="$value" ;;
+    raw|R) RAW="$value" ;;
+    topic|topics) TOPICS="$value" ;;
+    *) echo "Unknown arg: $key" >&2 ;;
+  esac
+done
+
+if $REPLAY; then
+  dir="$HOME/.cx/offline"
+  shopt -s nullglob globstar
+  files=("$dir"/**/*.txt)
+  if (( ${#files[@]} == 0 )); then
+    echo "No offline prompts to replay" >&2
+    exit 0
+  fi
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    read -s -p "Enter OpenAI API key: " OPENAI_API_KEY
+    echo
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+      echo "API key required for replay" >&2
+      exit 1
+    fi
+    export OPENAI_API_KEY
+  fi
+  for f in "${files[@]}"; do
+    prompt=$(cat "$f")
+    if response=$(OPENAI_PROMPT="$prompt" python3 - <<'PY'
+import os, json, urllib.request, urllib.error, sys
+prompt = os.environ['OPENAI_PROMPT']
+key = os.environ['OPENAI_API_KEY']
+data = json.dumps({"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": prompt}]})
+req = urllib.request.Request(
+    'https://api.openai.com/v1/chat/completions',
+    data=data.encode(),
+    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        out = json.load(resp)
+    print(out['choices'][0]['message']['content'])
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+PY
+    ); then
+      printf '%s\n' "$response"
+      rm "$f"
+      rmdir -p "$(dirname "$f")" 2>/dev/null || true
+      echo "Replayed and removed $f" >&2
+    else
+      echo "Failed to replay $f; leaving in queue" >&2
+    fi
+  done
+  exit 0
+fi
+
+if $SHOW_METRICS; then
+  file="$HOME/.cx/metrics/$project.log"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    echo "No metrics log for $project" >&2
+  fi
+  exit 0
+fi
+
+if $SHOW_GRID; then
+  file="$HOME/.cx/grid/$project.grid"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    echo "No grid for $project" >&2
+  fi
+  exit 0
+fi
+
+if ! $SHOW_DICT && [[ -z "$ROLE" || -z "$GOAL" ]]; then
+  usage
+  exit 1
+fi
+
+if $ESTIMATE; then
+  DRY=true
+fi
+
+# Load dictionary entries and usage counts
+declare -A DICT
+declare -A USAGE
+declare -A SESSION_SYMS
+load_dict() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    DICT["$k"]="$v"
+  done < "$file"
+}
+load_usage() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    USAGE["$k"]="$v"
+  done < "$file"
+}
+
+load_dict "$HOME/.cx/dict"
+load_dict ".cx/dict"
+load_usage ".cx/usage"
+
+# Summarize symbol usage for context
+usage_report() {
+  local usage_file="$1"
+  local dict_file="$2"
+  [[ -f "$usage_file" ]] || return 0
+  local avg=$(awk -F= '{s+=$2} END{if(NR>0) printf "%.2f", s/NR; else print 0}' "$usage_file")
+  local total_used=$(wc -l < "$usage_file")
+  local total_dict=$total_used
+  local unused=0
+  if [[ -f "$dict_file" ]]; then
+    total_dict=$(wc -l < "$dict_file")
+    local used_syms=$(cut -d '=' -f1 "$usage_file" | sort | uniq | wc -l)
+    unused=$(( total_dict - used_syms ))
+  fi
+  echo "Total symbols: $total_dict, used: $total_used, unused: $unused, avg use: $avg" >&2
+  echo "Top symbols:" >&2
+  while IFS='=' read -r sym count; do
+    local phrase="${DICT[$sym]}"
+    echo "$sym -> $phrase ($count)" >&2
+  done < <(sort -t '=' -k2 -nr "$usage_file" | head -n 5)
+  echo "Least-used symbols:" >&2
+  while IFS='=' read -r sym count; do
+    local phrase="${DICT[$sym]}"
+    echo "$sym -> $phrase ($count)" >&2
+  done < <(sort -t '=' -k2 -n "$usage_file" | head -n 5)
+}
+
+relation_report() {
+  local file="$HOME/.cx/relations"
+  [[ -f "$file" ]] || return 0
+  echo "Top symbol triads:" >&2
+  sort -t '=' -k2 -nr "$file" | head -n 5 >&2
+}
+
+suggest_relation_tags() {
+  local file="$HOME/.cx/relations"
+  [[ -f "$file" ]] || return 0
+  local threshold=${CX_REL_SUGGEST:-3}
+  while IFS='=' read -r combo count; do
+    (( count < threshold )) && continue
+    IFS=',' read -r a b c <<<"$combo"
+    [[ -n "$c" ]] || continue
+    local phrase="${DICT[$a]}, ${DICT[$b]}, ${DICT[$c]}"
+    local exists=0
+    for val in "${DICT[@]}"; do
+      [[ "$val" == "$phrase" ]] && { exists=1; break; }
+    done
+    (( exists )) && continue
+    read -p "Mint tag for frequent triad $combo ($count uses)? Enter @tag or blank to skip: " tag
+    if [[ $tag == @* ]]; then
+      mkdir -p .cx
+      echo "$tag=$phrase" >> .cx/dict
+      DICT["$tag"]="$phrase"
+      USAGE["$tag"]=${USAGE[$tag]:-0}
+      {
+        for k in "${!USAGE[@]}"; do
+          echo "$k=${USAGE[$k]}"
+        done
+      } | sort > .cx/usage
+      usage_report .cx/usage .cx/dict
+      analyze_prune .cx/dict
+    fi
+  done < "$file"
+}
+
+# Offer dynamic pruning with contextual analysis
+analyze_prune() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  local usage_file="$(dirname "$file")/usage"
+  local lines=$(wc -l < "$file")
+  local hint="${CX_DICT_MAX:-0}"
+  (( hint > 0 && lines > hint )) || return 0
+  echo "Dictionary has $lines entries (limit $hint)" >&2
+  if [[ -f "$usage_file" ]]; then
+    echo "Least-used candidates:" >&2
+    sort -t '=' -k2 -n "$usage_file" | head -n 5 >&2
+  fi
+  read -p "Prune dictionary? Enter max entries to keep (blank to skip): " max
+  [[ -n "$max" ]] || return 0
+  if (( max < lines )); then
+    if [[ -f "$usage_file" ]]; then
+      cut -d '=' -f1 "$file" > "$file.syms"
+      sort -t '=' -k2 -nr "$usage_file" | cut -d '=' -f1 | grep -F -f "$file.syms" | head -n "$max" > "$file.keep"
+      grep -F -f "$file.keep" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+      grep -F -f "$file.keep" "$usage_file" > "$usage_file.tmp" && mv "$usage_file.tmp" "$usage_file"
+      rm "$file.keep" "$file.syms"
+    else
+      tail -n "$max" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    fi
+    echo "Pruned to $max entries" >&2
+  fi
+}
+
+# Show dictionary and usage counts
+if $SHOW_DICT; then
+  usage_report .cx/usage .cx/dict
+  relation_report
+  for sym in $(printf '%s\n' "${!DICT[@]}" | sort); do
+    echo "$sym -> ${DICT[$sym]} (${USAGE[$sym]:-0})"
+  done
+  exit 0
+fi
+
+# Expand ^st{N} to ^stN before symbol checks
+global_expand_st() {
+  printf '%s' "$1" | sed -E 's/\^st\{([0-9]+)\}/^st\1/g'
+}
+ROLE=$(global_expand_st "$ROLE")
+GOAL=$(global_expand_st "$GOAL")
+CONS=$(global_expand_st "$CONS")
+REASON=$(global_expand_st "$REASON")
+OUT=$(global_expand_st "$OUT")
+RAW=$(global_expand_st "$RAW")
+
+# Fold raw terms into goal or constraints
+if [[ -n "$RAW" ]]; then
+  IFS=';' read -ra RAW_PARTS <<< "$RAW"
+  for part in "${RAW_PARTS[@]}"; do
+    part=$(printf '%s' "$part" | xargs)
+    case "$part" in
+      g:*|goal:*)
+        part=${part#*:}
+        GOAL="${GOAL}${GOAL:+, }$part"
+        ;;
+      c:*|cons:*)
+        part=${part#*:}
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+      *)
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+    esac
+  done
+fi
+
+# Normalize comma spacing early for deterministic tokens
+global_norm_commas() {
+  printf '%s' "$1" | sed -E 's/ *, */,/g; s/,/, /g'
+}
+CONS=$(global_norm_commas "$CONS")
+REASON=$(global_norm_commas "$REASON")
+GOAL=$(global_norm_commas "$GOAL")
+
+# Auto-mint domain tags for repeated phrases
+auto_mint_tags() {
+  local text="$1"
+  local lower=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')
+  local repeats=$(printf '%s' "$lower" |
+    tr -s ' ' '\n' |
+    awk '{w[NR]=$0} END{for(i=1;i<NR;i++){p=w[i]" "w[i+1];c[p]++} for(p in c) if(c[p]>1) print p}')
+  mapfile -t phrases <<< "$repeats"
+  for phrase in "${phrases[@]}"; do
+    [[ -z "$phrase" ]] && continue
+    local found=0
+    for val in "${DICT[@]}"; do
+      if [[ "$val" == "$phrase" ]]; then
+        found=1
+        break
+      fi
+    done
+    [[ $found -eq 1 ]] && continue
+    read -p "Mint tag for \"$phrase\"? Enter @tag or blank to skip: " tag
+    if [[ $tag == @* ]]; then
+      mkdir -p .cx
+      echo "$tag=$phrase" >> .cx/dict
+      DICT["$tag"]="$phrase"
+      USAGE["$tag"]=$(( ${USAGE[$tag]:-0} + 1 ))
+      { 
+        for k in "${!USAGE[@]}"; do
+          echo "$k=${USAGE[$k]}"
+        done
+      } | sort > .cx/usage
+      usage_report .cx/usage .cx/dict
+      analyze_prune .cx/dict
+    fi
+  done
+}
+
+mine_response_log() {
+  local log="$HOME/.cx/responses/$project.log"
+  [[ -f "$log" ]] || return 0
+  auto_mint_tags "$(cat "$log")"
+}
+
+mine_prompt_log() {
+  local log="$HOME/.cx/prompts/$project.log"
+  [[ -f "$log" ]] || return 0
+  auto_mint_tags "$(cat "$log")"
+}
+
+auto_mint_tags "$ROLE $GOAL $CONS $REASON $OUT"
+mine_response_log
+mine_prompt_log
+
+# Preserve symbolized fields before replacement for token estimates
+ROLE_ORIG="$ROLE"
+GOAL_ORIG="$GOAL"
+CONS_ORIG="$CONS"
+REASON_ORIG="$REASON"
+OUT_ORIG="$OUT"
+
+# Prompt for undefined symbols and numeric macros and persist them
+symbols=$(printf '%s %s %s %s %s' "$ROLE" "$GOAL" "$CONS" "$REASON" "$OUT" | grep -oE '[@^#][A-Za-z0-9_]+' | sort -u)
+for sym in $symbols; do
+  if [[ -z "${DICT[$sym]+x}" ]]; then
+    read -p "Define $sym: " def
+    if [[ -n "$def" ]]; then
+      mkdir -p .cx
+      echo "$sym=$def" >> .cx/dict
+      DICT["$sym"]="$def"
+      USAGE["$sym"]=$(( ${USAGE[$sym]:-0} + 1 ))
+    fi
+  else
+    USAGE["$sym"]=$(( ${USAGE[$sym]:-0} + 1 ))
+  fi
+done
+
+if [[ ${#USAGE[@]} -gt 0 ]]; then
+  mkdir -p .cx
+  {
+    for k in "${!USAGE[@]}"; do
+      echo "$k=${USAGE[$k]}"
+    done
+  } | sort > .cx/usage
+  usage_report .cx/usage .cx/dict
+  relation_report
+  analyze_prune .cx/dict
+fi
+
+# Sort keys by length for longest-first replacements
+set +u
+if [ ${#DICT[@]} -gt 0 ]; then
+  sorted_keys=$(printf '%s\n' "${!DICT[@]}" | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-)
+else
+  sorted_keys=""
+fi
+set -u
+
+replace_dict() {
+  local text="$1"
+  for k in $sorted_keys; do
+    v="${DICT[$k]}"
+    esc_k=$(printf '%s' "$k" | sed -e 's/[.[\\*^$&/]/\\&/g')
+    text=$(printf '%s' "$text" | sed -e "s/$esc_k/$v/g")
+  done
+  printf '%s' "$text"
+}
+
+# Log usage context for each symbol
+log_symbol_context() {
+  local field="$1"
+  local orig="$2"
+  local expanded="$3"
+  local timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+  local syms=$(printf '%s' "$orig" | grep -oE '[@^#][A-Za-z0-9_]+' | sort -u)
+  for sym in $syms; do
+    mkdir -p "$HOME/.cx/context"
+    printf '[%s] field=%s text=%s\n' "$timestamp" "$field" "$expanded" >> "$HOME/.cx/context/${sym}.log"
+    SESSION_SYMS["$sym"]=1
+    if [[ -n "$TOPICS" ]]; then
+      IFS=',' read -ra topic_arr <<< "$TOPICS"
+      mkdir -p "$HOME/.cx/topics"
+      for topic in "${topic_arr[@]}"; do
+        printf '[%s] topic=%s symbol=%s field=%s text=%s\n' "$timestamp" "$topic" "$sym" "$field" "$expanded" >> "$HOME/.cx/topics/${topic}.log"
+      done
+    fi
+  done
+}
+
+log_symbol_relations() {
+  local file="$HOME/.cx/relations"
+  mkdir -p "$(dirname "$file")"
+  declare -A combos
+  if [[ -f "$file" ]]; then
+    while IFS='=' read -r combo count; do
+      [[ -n "$combo" ]] || continue
+      combos["$combo"]="$count"
+    done < "$file"
+  fi
+  local syms=(${!SESSION_SYMS[@]})
+  local limit=${CX_REL_SYMBOLS:-9}
+  if (( ${#syms[@]} > limit )); then
+    syms=("${syms[@]:0:limit}")
+  fi
+  local i j k combo
+  for ((i=0; i<${#syms[@]}-2; i++)); do
+    for ((j=i+1; j<${#syms[@]}-1; j++)); do
+      for ((k=j+1; k<${#syms[@]}; k++)); do
+        combo="${syms[i]},${syms[j]},${syms[k]}"
+        combos["$combo"]=$(( ${combos["$combo"]:-0} + 1 ))
+      done
+    done
+  done
+  {
+    for c in "${!combos[@]}"; do
+      echo "$c=${combos[$c]}"
+    done
+  } | sort > "$file"
+}
+
+# Maintain a neuron-like grid mapping symbols to weighted neighbors
+update_symbol_grid() {
+  local dir="$HOME/.cx/grid"
+  mkdir -p "$dir"
+  local file="$dir/$project.grid"
+  declare -A grid
+  if [[ -f "$file" ]]; then
+    while IFS=':' read -r center neighbors; do
+      [[ -n "$center" ]] || continue
+      grid["$center"]="$neighbors"
+    done < "$file"
+  fi
+  local syms=(${!SESSION_SYMS[@]})
+  local limit=${CX_REL_SYMBOLS:-9}
+  if (( ${#syms[@]} > limit )); then
+    syms=("${syms[@]:0:limit}")
+  fi
+  local i j center n neighbors token name count
+  for ((i=0; i<${#syms[@]}; i++)); do
+    center="${syms[i]}"
+    declare -A counts=()
+    neighbors="${grid[$center]-}"
+    for token in $neighbors; do
+      name="${token%%=*}"
+      count="${token##*=}"
+      counts[$name]=$count
+    done
+    for ((j=0; j<${#syms[@]}; j++)); do
+      (( i == j )) && continue
+      n="${syms[j]}"
+      ((counts[$n]++))
+    done
+    local sorted=$(for name in "${!counts[@]}"; do echo "${counts[$name]} $name"; done | sort -rn | head -n8)
+    neighbors=""
+    while read -r c n; do
+      neighbors+="$n=$c "
+    done <<< "$sorted"
+    neighbors="${neighbors% }"
+    grid["$center"]="$neighbors"
+  done
+  {
+    for c in "${!grid[@]}"; do
+      echo "$c:${grid[$c]}"
+    done
+  } > "$file"
+}
+
+ROLE=$(replace_dict "$ROLE")
+GOAL=$(replace_dict "$GOAL")
+CONS=$(replace_dict "$CONS")
+REASON=$(replace_dict "$REASON")
+OUT=$(replace_dict "$OUT")
+
+# Record context for symbols used in each field
+log_symbol_context role "$ROLE_ORIG" "$ROLE"
+log_symbol_context goal "$GOAL_ORIG" "$GOAL"
+log_symbol_context cons "$CONS_ORIG" "$CONS"
+log_symbol_context reason "$REASON_ORIG" "$REASON"
+log_symbol_context out "$OUT_ORIG" "$OUT"
+log_symbol_relations
+update_symbol_grid
+suggest_relation_tags
+
+prompt="Follow these instructions exactly.\n::r $ROLE\n::g $GOAL"
+[[ -n "$CONS" ]] && prompt+=$'\n'"::c $CONS"
+[[ -n "$REASON" ]] && prompt+=$'\n'"::s $REASON"
+[[ -n "$OUT" ]] && prompt+=$'\n'"::o $OUT"
+
+comp_prompt="Follow these instructions exactly.\n::r $ROLE_ORIG\n::g $GOAL_ORIG"
+[[ -n "$CONS_ORIG" ]] && comp_prompt+=$'\n'"::c $CONS_ORIG"
+[[ -n "$REASON_ORIG" ]] && comp_prompt+=$'\n'"::s $REASON_ORIG"
+[[ -n "$OUT_ORIG" ]] && comp_prompt+=$'\n'"::o $OUT_ORIG"
+
+mkdir -p "$HOME/.cx/prompts"
+timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+echo "[$timestamp] $prompt" >> "$HOME/.cx/prompts/$project.log"
+
+if $ESTIMATE; then
+  read raw_tokens compressed_tokens <<<"$(RAW_PROMPT="$prompt" COMP_PROMPT="$comp_prompt" python3 - <<'PY'
+import os
+raw = os.environ['RAW_PROMPT']
+comp = os.environ['COMP_PROMPT']
+try:
+    import tiktoken
+    enc = tiktoken.encoding_for_model('gpt-3.5-turbo')
+    print(len(enc.encode(raw)), len(enc.encode(comp)))
+except Exception:
+    print(len(raw.split()), len(comp.split()))
+PY
+  )"
+  if [ "$raw_tokens" -gt 0 ]; then
+    savings=$(( (raw_tokens - compressed_tokens) * 100 / raw_tokens ))
+  else
+    savings=0
+  fi
+  echo "raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >&2
+  mkdir -p "$HOME/.cx/metrics"
+  project=$(basename "$(pwd)")
+  timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+  echo "[$timestamp] raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >> "$HOME/.cx/metrics/$project.log"
+fi
+
+echo -e "$prompt"
+
+if ! $DRY; then
+  if ! $OFFLINE && [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    read -s -p "Enter OpenAI API key (leave blank for offline): " OPENAI_API_KEY
+    echo
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+      OFFLINE=true
+    else
+      export OPENAI_API_KEY
+    fi
+  fi
+  if $OFFLINE; then
+    mkdir -p "$HOME/.cx/offline/$project"
+    timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+    file="$HOME/.cx/offline/$project/$timestamp.txt"
+    printf '%s\n' "$prompt" > "$file"
+    echo "Saved prompt offline to $file" >&2
+  else
+    if ! response=$(OPENAI_PROMPT="$prompt" python3 - <<'PY'
+import os, json, urllib.request, urllib.error, sys
+prompt = os.environ['OPENAI_PROMPT']
+key = os.environ['OPENAI_API_KEY']
+data = json.dumps({"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": prompt}]})
+req = urllib.request.Request(
+    'https://api.openai.com/v1/chat/completions',
+    data=data.encode(),
+    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        out = json.load(resp)
+    print(out['choices'][0]['message']['content'])
+except urllib.error.HTTPError as e:
+    sys.stderr.write(e.read().decode())
+    sys.exit(1)
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+PY
+    ); then
+      mkdir -p "$HOME/.cx/offline/$project"
+      timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+      file="$HOME/.cx/offline/$project/$timestamp.txt"
+      printf '%s\n' "$prompt" > "$file"
+      echo "API call failed; saved prompt offline to $file" >&2
+    else
+      printf '%s\n' "$response"
+      mkdir -p "$HOME/.cx/responses"
+      timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+      echo "[$timestamp] $response" >> "$HOME/.cx/responses/$project.log"
+      auto_mint_tags "$response"
+      mine_response_log
+    fi
+  fi
+fi
+
