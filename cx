@@ -1,0 +1,2318 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CX_HOME="${CX_HOME:-$HOME/.cx}"
+
+usage() {
+  cat <<'USAGE' >&2
+Usage: cx role=VALUE goal=VALUE [cons=VAL] [reason=VAL] [out=VAL] [raw=VAL] [topic=VAL] [model=VAL] [temp=VAL] [--estimate] [--dry] [--offline] [--replay] [--dict] [--metrics] [--grid] [--relations] [--topics] [--audit] [--inspect] [--hotspots] [--stale] [--lint] [--fix] [--baseline] [--start]
+USAGE
+}
+
+run_baseline_step() {
+  local label=$1
+  shift
+  echo >&2
+  echo ">>> $label" >&2
+  if "$@"; then
+    echo ">>> $label completed" >&2
+    return 0
+  else
+    local rc=$?
+    echo ">>> $label failed (exit $rc)" >&2
+    return $rc
+  fi
+}
+
+run_baseline_suite() {
+  local status=0
+  echo "Starting baseline repository automation for $project" >&2
+  local -a lint_cmd=("$0" "--lint")
+  if $FIX; then
+    lint_cmd+=("--fix")
+  fi
+  run_baseline_step "Lint checks" "${lint_cmd[@]}" || status=1
+  run_baseline_step "Repository audit" "$0" "--audit" || status=1
+  run_baseline_step "Repository inspection" "$0" "--inspect" || status=1
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    run_baseline_step "Hotspot analysis" "$0" "--hotspots" || status=1
+    run_baseline_step "Stale file scan" "$0" "--stale" || status=1
+  else
+    echo ">>> Skipping git-based analyses (repository not detected)" >&2
+  fi
+  if (( status == 0 )); then
+    echo "Baseline automation complete. Review the logs under $CX_HOME for details." >&2
+  else
+    echo "Baseline automation finished with issues. Review the output above." >&2
+  fi
+  return $status
+}
+
+run_custom_block() {
+  local label=$1
+  local commands=$2
+  local status=0
+
+  CUSTOM_BLOCK_LAST_RAN=false
+
+  while IFS= read -r cmd; do
+    if [[ $cmd =~ ^[[:space:]]*$ ]]; then
+      continue
+    fi
+    if [[ $cmd =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    CUSTOM_BLOCK_LAST_RAN=true
+    run_baseline_step "$label: $cmd" bash -lc "$cmd" || status=1
+  done <<<"$commands"
+
+  return $status
+}
+
+detect_node_manager() {
+  if [[ ! -f package.json ]]; then
+    return 1
+  fi
+  if [[ -f bun.lockb || -f bunfig.toml ]] && command -v bun >/dev/null 2>&1; then
+    printf 'bun'
+    return 0
+  fi
+  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
+    printf 'pnpm'
+    return 0
+  fi
+  if [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
+    printf 'yarn'
+    return 0
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    printf 'npm'
+    return 0
+  fi
+  return 1
+}
+
+node_dependencies_ready() {
+  [[ -d node_modules || -f .pnp.cjs || -f .pnp.js ]]
+}
+
+run_node_install() {
+  local manager=$1
+  case "$manager" in
+    bun)
+      bun install --frozen-lockfile
+      ;;
+    pnpm)
+      pnpm install --frozen-lockfile
+      ;;
+    yarn)
+      yarn install --silent --frozen-lockfile
+      ;;
+    npm)
+      npm install --no-audit --no-fund
+      ;;
+    *)
+      echo "Unknown Node package manager: $manager" >&2
+      return 1
+      ;;
+  esac
+}
+
+npm_has_script() {
+  local script=$1
+  [[ -f package.json ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$script" <<'PY'
+import json, sys
+script = sys.argv[1]
+try:
+    with open('package.json', encoding='utf-8') as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+scripts = data.get('scripts') or {}
+cmd = scripts.get(script)
+if isinstance(cmd, str) and cmd.strip():
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+run_node_script() {
+  local manager=$1
+  local script=$2
+  case "$manager" in
+    bun)
+      bun run "$script"
+      ;;
+    pnpm)
+      pnpm run "$script"
+      ;;
+    yarn)
+      yarn run "$script"
+      ;;
+    npm)
+      npm run "$script"
+      ;;
+    *)
+      echo "Unknown Node package manager: $manager" >&2
+      return 1
+      ;;
+  esac
+}
+
+python_module_available() {
+  local module=$1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$module" <<'PY'
+import importlib.util, sys
+module = sys.argv[1]
+spec = importlib.util.find_spec(module)
+sys.exit(0 if spec is not None else 1)
+PY
+}
+
+python_tests_present() {
+  [[ -d tests || -d test || -f pytest.ini || -f tox.ini ]]
+}
+
+python_has_pip() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  if python3 -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+detect_python_manager() {
+  if command -v poetry >/dev/null 2>&1; then
+    if [[ -f poetry.lock ]]; then
+      printf 'poetry'
+      return 0
+    fi
+    if [[ -f pyproject.toml ]] && grep -q '\[tool\.poetry\]' pyproject.toml; then
+      printf 'poetry'
+      return 0
+    fi
+  fi
+  if command -v pipenv >/dev/null 2>&1 && [[ -f Pipfile ]]; then
+    printf 'pipenv'
+    return 0
+  fi
+  if python_has_pip; then
+    if [[ -f requirements.txt || -f requirements-dev.txt || -f dev-requirements.txt ]]; then
+      printf 'pip'
+      return 0
+    fi
+    if [[ -f pyproject.toml || -f setup.py || -f setup.cfg ]]; then
+      printf 'pip'
+      return 0
+    fi
+  fi
+  return 1
+}
+
+run_python_install() {
+  local manager=$1
+  case "$manager" in
+    poetry)
+      poetry install
+      ;;
+    pipenv)
+      pipenv install --dev
+      ;;
+    pip)
+      local -a pip_args=()
+      if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+        local current_uid=${EUID:-$(id -u)}
+        if [[ $current_uid -ne 0 ]]; then
+          pip_args+=(--user)
+        fi
+      fi
+      local rc=0
+      local ran=false
+      local req
+      for req in requirements.txt requirements-dev.txt dev-requirements.txt; do
+        if [[ -f $req ]]; then
+          ran=true
+          if ! python3 -m pip install "${pip_args[@]}" -r "$req"; then
+            rc=1
+          fi
+        fi
+      done
+      if ! $ran; then
+        if [[ -f pyproject.toml || -f setup.py || -f setup.cfg ]]; then
+          ran=true
+          if ! python3 -m pip install "${pip_args[@]}" -e .; then
+            rc=1
+          fi
+        fi
+      fi
+      if ! $ran; then
+        echo ">>> No Python requirements found to install" >&2
+      fi
+      return $rc
+      ;;
+    *)
+      echo "Unknown Python dependency manager: $manager" >&2
+      return 1
+      ;;
+  esac
+}
+
+has_make_target() {
+  local target=$1
+  if [[ ! -f Makefile && ! -f makefile ]]; then
+    return 1
+  fi
+  make -q "$target" >/dev/null 2>&1
+  local rc=$?
+  [[ $rc -eq 0 || $rc -eq 1 ]]
+}
+
+ruby_project_present() {
+  [[ -f Gemfile || -f gems.rb ]]
+}
+
+run_bundle_install() {
+  bundle install --jobs "${BUNDLE_JOBS:-4}" --retry "${BUNDLE_RETRY:-3}"
+}
+
+bundle_rspec_available() {
+  command -v bundle >/dev/null 2>&1 || return 1
+  bundle exec rspec --version >/dev/null 2>&1
+}
+
+bundle_has_task() {
+  local task=$1
+  command -v bundle >/dev/null 2>&1 || return 1
+  local tasks
+  if ! tasks=$(bundle exec rake -AT 2>/dev/null); then
+    return 1
+  fi
+  grep -E "^rake ${task}(\\[|$)" <<<"$tasks" >/dev/null 2>&1
+}
+
+composer_project_present() {
+  [[ -f composer.json ]]
+}
+
+composer_has_script() {
+  local script=$1
+  [[ -f composer.json ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$script" <<'PY'
+import json, sys
+script = sys.argv[1]
+try:
+    with open('composer.json', encoding='utf-8') as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+scripts = data.get('scripts') or {}
+cmd = scripts.get(script)
+if isinstance(cmd, str) and cmd.strip():
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+run_composer_script() {
+  local script=$1
+  composer run-script --no-interaction "$script"
+}
+
+mix_project_present() {
+  [[ -f mix.exs ]]
+}
+
+mix_tests_present() {
+  [[ -d test ]]
+}
+
+stack_project_present() {
+  [[ -f stack.yaml ]]
+}
+
+stack_tests_present() {
+  if cabal_tests_present; then
+    return 0
+  fi
+  [[ -d test || -d tests ]]
+}
+
+cabal_project_present() {
+  compgen -G "*.cabal" >/dev/null 2>&1
+}
+
+cabal_tests_present() {
+  local file
+  for file in *.cabal; do
+    if [[ -e $file ]] && grep -Eq '^[[:space:]]*test-suite[[:space:]]+' "$file"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+swift_package_present() {
+  [[ -f Package.swift ]]
+}
+
+swift_tests_present() {
+  [[ -d Tests ]]
+}
+
+sbt_project_present() {
+  [[ -f build.sbt || -d project || -d project/project ]]
+}
+
+sbt_tests_present() {
+  [[ -d src/test || -d src/test/scala || -d src/test/java || -d src/test/kotlin ]]
+}
+
+flutter_project_present() {
+  [[ -f pubspec.yaml ]] || return 1
+  if grep -Eq '^\s*flutter:' pubspec.yaml 2>/dev/null || grep -Eq 'sdk:\s*flutter' pubspec.yaml 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+flutter_tests_present() {
+  [[ -d test || -d integration_test ]]
+}
+
+dart_project_present() {
+  [[ -f pubspec.yaml ]] || return 1
+  if flutter_project_present; then
+    return 1
+  fi
+  return 0
+}
+
+dart_tests_present() {
+  [[ -d test ]]
+}
+
+dotnet_project_present() {
+  local file
+  for file in *.sln *.csproj *.fsproj *.vbproj; do
+    if [[ -e $file ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+maven_project_present() {
+  [[ -f pom.xml ]]
+}
+
+gradle_project_present() {
+  [[ -f build.gradle || -f build.gradle.kts || -f settings.gradle || -f settings.gradle.kts || -f gradlew ]]
+}
+
+cmake_project_present() {
+  [[ -f CMakeLists.txt ]]
+}
+
+cmake_build_dir() {
+  printf '%s' "${CX_CMAKE_BUILD_DIR:-build}"
+}
+
+run_cmake_configure() {
+  local build_dir
+  build_dir=$(cmake_build_dir)
+  local -a extra_args=()
+  if [[ -n "${CX_CMAKE_CONFIGURE_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    extra_args=(${CX_CMAKE_CONFIGURE_ARGS})
+  fi
+  cmake -S . -B "$build_dir" "${extra_args[@]}"
+}
+
+run_cmake_build() {
+  local build_dir
+  build_dir=$(cmake_build_dir)
+  local -a build_args=()
+  if [[ -n "${CX_CMAKE_BUILD_TARGET:-}" ]]; then
+    build_args+=(--target "${CX_CMAKE_BUILD_TARGET}")
+  fi
+  if [[ -n "${CX_CMAKE_BUILD_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    build_args+=(${CX_CMAKE_BUILD_ARGS})
+  fi
+  cmake --build "$build_dir" "${build_args[@]}"
+}
+
+cmake_ctest_ready() {
+  local build_dir
+  build_dir=$(cmake_build_dir)
+  [[ -d "$build_dir" ]] || return 1
+  [[ -f "$build_dir/CTestTestfile.cmake" || -d "$build_dir/Testing" ]]
+}
+
+run_ctest_suite() {
+  local build_dir
+  build_dir=$(cmake_build_dir)
+  local -a ctest_args=(--output-on-failure)
+  if [[ -n "${CX_CTEST_ARGS:-}" ]]; then
+    ctest_args=()
+    # shellcheck disable=SC2206
+    ctest_args=(${CX_CTEST_ARGS})
+  fi
+  (cd "$build_dir" && ctest "${ctest_args[@]}")
+}
+
+run_project_actions() {
+  local status=0
+  local ran_any=false
+
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    run_baseline_step "Git status summary" git status -sb || status=1
+    ran_any=true
+  fi
+
+  local node_manager
+  if node_manager=$(detect_node_manager); then
+    local manager_label=$node_manager
+    if ! $SKIP_INSTALL && ! node_dependencies_ready; then
+      run_baseline_step "Install Node dependencies ($manager_label)" run_node_install "$node_manager" || status=1
+      ran_any=true
+    elif $SKIP_INSTALL && ! node_dependencies_ready; then
+      echo ">>> Skipping Node dependency installation ($manager_label) because CX_START_SKIP_INSTALL is set" >&2
+    fi
+    if npm_has_script lint; then
+      run_baseline_step "Run $manager_label lint script" run_node_script "$node_manager" "lint" || status=1
+      ran_any=true
+    fi
+    if npm_has_script test; then
+      if ! $SKIP_TESTS; then
+        run_baseline_step "Run $manager_label test script" run_node_script "$node_manager" "test" || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping $manager_label test script because CX_START_SKIP_TESTS is set" >&2
+      fi
+    fi
+  elif [[ -f package.json ]]; then
+    echo ">>> Detected package.json but no supported Node package manager (npm, yarn, pnpm, bun) was found" >&2
+  fi
+
+  if ruby_project_present; then
+    if command -v bundle >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Install Ruby gems (bundle)" run_bundle_install || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping bundle install because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if ! $SKIP_TESTS; then
+        if bundle_rspec_available && [[ -d spec ]]; then
+          run_baseline_step "Run bundle exec rspec" bundle exec rspec || status=1
+          ran_any=true
+        elif bundle_has_task test; then
+          run_baseline_step "Run bundle exec rake test" bundle exec rake test || status=1
+          ran_any=true
+        elif bundle_has_task spec; then
+          run_baseline_step "Run bundle exec rake spec" bundle exec rake spec || status=1
+          ran_any=true
+        fi
+      else
+        echo ">>> Skipping Ruby test commands because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected Gemfile but the bundle command is unavailable" >&2
+    fi
+  fi
+
+  if composer_project_present; then
+    if command -v composer >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Install PHP dependencies (composer)" composer install --no-interaction || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping composer install because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if ! $SKIP_TESTS; then
+        if composer_has_script test; then
+          run_baseline_step "Run composer test script" run_composer_script test || status=1
+          ran_any=true
+        elif [[ -x vendor/bin/phpunit ]]; then
+          run_baseline_step "Run vendor/bin/phpunit" vendor/bin/phpunit || status=1
+          ran_any=true
+        fi
+      else
+        echo ">>> Skipping composer test commands because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected composer.json but composer is not installed" >&2
+    fi
+  fi
+
+  if mix_project_present; then
+    if command -v mix >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Install Elixir dependencies (mix deps.get)" mix deps.get || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping mix deps.get because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if mix_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run mix test" mix test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping mix test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected mix.exs but the mix command is unavailable" >&2
+    fi
+  fi
+
+  if stack_project_present; then
+    if command -v stack >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Install Haskell dependencies (stack build --only-dependencies)" stack build --only-dependencies || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping stack build --only-dependencies because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if stack_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run stack test" stack test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping stack test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected stack.yaml but the stack command is unavailable" >&2
+    fi
+  fi
+
+  if cabal_project_present; then
+    if command -v cabal >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Prepare Haskell dependencies (cabal v2-build --only-dependencies)" cabal v2-build --only-dependencies || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping cabal v2-build --only-dependencies because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if cabal_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run cabal v2-test" cabal v2-test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping cabal v2-test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected Cabal files but the cabal command is unavailable" >&2
+    fi
+  fi
+
+  if swift_package_present; then
+    if command -v swift >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Resolve Swift package dependencies" swift package resolve || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping swift package resolve because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if swift_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run swift test" swift test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping swift test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected Package.swift but the swift command is unavailable" >&2
+    fi
+  fi
+
+  if sbt_project_present; then
+    if command -v sbt >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Warm sbt dependencies" sbt update || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping sbt update because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if sbt_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run sbt test" sbt test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping sbt test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected sbt build files but sbt is not installed" >&2
+    fi
+  fi
+
+  if flutter_project_present; then
+    if command -v flutter >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Fetch Flutter dependencies" flutter pub get || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping flutter pub get because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if flutter_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run flutter test" flutter test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping flutter test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected Flutter pubspec but the flutter command is unavailable" >&2
+    fi
+  elif dart_project_present; then
+    if command -v dart >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Fetch Dart dependencies" dart pub get || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping dart pub get because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if dart_tests_present; then
+        if ! $SKIP_TESTS; then
+          run_baseline_step "Run dart test" dart test || status=1
+          ran_any=true
+        else
+          echo ">>> Skipping dart test because CX_START_SKIP_TESTS is set" >&2
+        fi
+      fi
+    else
+      echo ">>> Detected Dart pubspec but the dart command is unavailable" >&2
+    fi
+  fi
+
+  local python_manager
+  if python_manager=$(detect_python_manager); then
+    local python_label
+    case "$python_manager" in
+      poetry) python_label="Poetry" ;;
+      pipenv) python_label="Pipenv" ;;
+      pip) python_label="pip" ;;
+      *) python_label="$python_manager" ;;
+    esac
+    if ! $SKIP_INSTALL; then
+      run_baseline_step "Install Python dependencies ($python_label)" run_python_install "$python_manager" || status=1
+      ran_any=true
+    else
+      echo ">>> Skipping Python dependency installation ($python_label) because CX_START_SKIP_INSTALL is set" >&2
+    fi
+  else
+    local poetry_hint=0
+    if [[ -f poetry.lock ]]; then
+      poetry_hint=1
+    elif [[ -f pyproject.toml ]]; then
+      if grep -q '\[tool\.poetry\]' pyproject.toml 2>/dev/null; then
+        poetry_hint=1
+      fi
+    fi
+    if (( poetry_hint )) && ! command -v poetry >/dev/null 2>&1; then
+      echo ">>> Detected Poetry configuration but the poetry command is unavailable" >&2
+    elif [[ -f Pipfile ]] && ! command -v pipenv >/dev/null 2>&1; then
+      echo ">>> Detected Pipfile but pipenv is not installed" >&2
+    elif [[ -f requirements.txt || -f requirements-dev.txt || -f dev-requirements.txt || -f setup.py || -f setup.cfg || -f pyproject.toml ]] && ! command -v python3 >/dev/null 2>&1; then
+      echo ">>> Detected Python requirements but python3 is not installed" >&2
+    elif [[ -f requirements.txt || -f requirements-dev.txt || -f dev-requirements.txt || -f setup.py || -f setup.cfg || -f pyproject.toml ]] && ! python_has_pip; then
+      echo ">>> Python is available but pip is missing; install pip to automate dependency setup" >&2
+    fi
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    local ran_python_suite=false
+    if [[ -f tox.ini ]]; then
+      if ! $SKIP_TESTS; then
+        if command -v tox >/dev/null 2>&1; then
+          run_baseline_step "Run tox test suite" tox -q || status=1
+          ran_any=true
+          ran_python_suite=true
+        elif python_module_available tox; then
+          run_baseline_step "Run tox test suite" python3 -m tox -q || status=1
+          ran_any=true
+          ran_python_suite=true
+        else
+          echo ">>> Skipping tox run because the tox module is not installed" >&2
+        fi
+      else
+        echo ">>> Skipping tox test suite because CX_START_SKIP_TESTS is set" >&2
+      fi
+    fi
+    if ! $SKIP_TESTS && ! $ran_python_suite && python_tests_present; then
+      if python_module_available pytest; then
+        run_baseline_step "Run pytest" python3 -m pytest -q || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping pytest run because the pytest module is not installed" >&2
+      fi
+    elif python_tests_present && $SKIP_TESTS; then
+      echo ">>> Skipping pytest run because CX_START_SKIP_TESTS is set" >&2
+    fi
+  fi
+
+  if command -v make >/dev/null 2>&1; then
+    if has_make_target lint; then
+      run_baseline_step "Run make lint" make lint || status=1
+      ran_any=true
+    fi
+    if has_make_target test; then
+      if ! $SKIP_TESTS; then
+        run_baseline_step "Run make test" make test || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping make test because CX_START_SKIP_TESTS is set" >&2
+      fi
+    fi
+  fi
+
+  if [[ -f go.mod ]] && command -v go >/dev/null 2>&1; then
+    if ! $SKIP_TESTS; then
+      run_baseline_step "Run go test ./..." go test ./... || status=1
+      ran_any=true
+    else
+      echo ">>> Skipping go test ./... because CX_START_SKIP_TESTS is set" >&2
+    fi
+  fi
+
+  if [[ -f Cargo.toml ]] && command -v cargo >/dev/null 2>&1; then
+    if ! $SKIP_TESTS; then
+      run_baseline_step "Run cargo test" cargo test || status=1
+      ran_any=true
+    else
+      echo ">>> Skipping cargo test because CX_START_SKIP_TESTS is set" >&2
+    fi
+  fi
+
+  if dotnet_project_present; then
+    if command -v dotnet >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Run dotnet restore" dotnet restore || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping dotnet restore because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if ! $SKIP_TESTS; then
+        run_baseline_step "Run dotnet test" dotnet test || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping dotnet test because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected .NET solution or project files but the dotnet CLI is unavailable" >&2
+    fi
+  fi
+
+  if maven_project_present; then
+    if command -v mvn >/dev/null 2>&1; then
+      if ! $SKIP_INSTALL; then
+        run_baseline_step "Prepare Maven dependencies" mvn -B dependency:go-offline || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping Maven dependency warmup because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if ! $SKIP_TESTS; then
+        run_baseline_step "Run mvn test" mvn -B test || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping mvn test because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected pom.xml but Maven (mvn) is not installed" >&2
+    fi
+  fi
+
+  if gradle_project_present; then
+    local -a gradle_cmd=()
+    if [[ -f gradlew ]]; then
+      if [[ -x gradlew ]]; then
+        gradle_cmd=(./gradlew)
+      else
+        gradle_cmd=(bash ./gradlew)
+      fi
+    elif command -v gradle >/dev/null 2>&1; then
+      gradle_cmd=(gradle)
+    fi
+    if (( ${#gradle_cmd[@]} )); then
+      if ! $SKIP_TESTS; then
+        run_baseline_step "Run Gradle tests" "${gradle_cmd[@]}" test || status=1
+        ran_any=true
+      else
+        echo ">>> Skipping Gradle tests because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected Gradle build files but gradle/gradlew is not available" >&2
+    fi
+  fi
+
+  if cmake_project_present; then
+    if command -v cmake >/dev/null 2>&1; then
+      local build_dir
+      build_dir=$(cmake_build_dir)
+      local configure_ok=false
+      if ! $SKIP_INSTALL; then
+        if run_baseline_step "Configure CMake project ($build_dir)" run_cmake_configure; then
+          configure_ok=true
+        else
+          status=1
+        fi
+        ran_any=true
+        if $configure_ok; then
+          run_baseline_step "Build CMake project ($build_dir)" run_cmake_build || status=1
+          ran_any=true
+        fi
+      else
+        echo ">>> Skipping CMake configure/build because CX_START_SKIP_INSTALL is set" >&2
+      fi
+      if ! $SKIP_TESTS; then
+        if command -v ctest >/dev/null 2>&1; then
+          if cmake_ctest_ready; then
+            run_baseline_step "Run ctest ($build_dir)" run_ctest_suite || status=1
+            ran_any=true
+          else
+            echo ">>> Skipping ctest because $build_dir has no CTest configuration yet; run cmake configure/build first" >&2
+          fi
+        else
+          echo ">>> Detected CMake project but the ctest command is unavailable" >&2
+        fi
+      else
+        echo ">>> Skipping ctest because CX_START_SKIP_TESTS is set" >&2
+      fi
+    else
+      echo ">>> Detected CMakeLists.txt but cmake is not installed" >&2
+    fi
+  fi
+
+  local extra_install=${CX_START_EXTRA_INSTALL-}
+  if [[ -n ${extra_install//[[:space:]]/} ]]; then
+    if ! $SKIP_INSTALL; then
+      run_custom_block "Custom install" "$extra_install" || status=1
+      if $CUSTOM_BLOCK_LAST_RAN; then
+        ran_any=true
+      fi
+    else
+      echo ">>> Skipping custom install commands because CX_START_SKIP_INSTALL is set" >&2
+    fi
+  fi
+
+  local extra_test=${CX_START_EXTRA_TEST-}
+  if [[ -n ${extra_test//[[:space:]]/} ]]; then
+    if ! $SKIP_TESTS; then
+      run_custom_block "Custom test" "$extra_test" || status=1
+      if $CUSTOM_BLOCK_LAST_RAN; then
+        ran_any=true
+      fi
+    else
+      echo ">>> Skipping custom test commands because CX_START_SKIP_TESTS is set" >&2
+    fi
+  fi
+
+  local extra_steps=${CX_START_EXTRA_STEPS-}
+  if [[ -n ${extra_steps//[[:space:]]/} ]]; then
+    run_custom_block "Custom start" "$extra_steps" || status=1
+    if $CUSTOM_BLOCK_LAST_RAN; then
+      ran_any=true
+    fi
+  fi
+
+  if ! $ran_any; then
+    echo ">>> No additional project-specific actions detected" >&2
+  fi
+
+  return $status
+}
+
+run_start_suite() {
+  local status=0
+  echo "Starting project bootstrap automation for $project" >&2
+  if ! run_baseline_suite; then
+    status=1
+  fi
+  if ! run_project_actions; then
+    status=1
+  fi
+  if (( status == 0 )); then
+    echo "Project bootstrap automation complete. Review generated reports and command output for next steps." >&2
+  else
+    echo "Project bootstrap automation finished with issues. Review the output above." >&2
+  fi
+  return $status
+}
+
+ESTIMATE=false
+DRY=false
+OFFLINE=false
+REPLAY=false
+SHOW_DICT=false
+SHOW_METRICS=false
+SHOW_GRID=false
+SHOW_REL=false
+SHOW_TOPICS=false
+SHOW_AUDIT=false
+SHOW_INSPECT=false
+SHOW_HOTSPOTS=false
+SHOW_STALE=false
+SHOW_LINT=false
+FIX=false
+RUN_BASELINE=false
+RUN_START=false
+SKIP_INSTALL=false
+SKIP_TESTS=false
+ARGS=()
+
+if [[ -n "${CX_START_SKIP_INSTALL:-}" ]]; then
+  SKIP_INSTALL=true
+fi
+if [[ -n "${CX_START_SKIP_TESTS:-}" ]]; then
+  SKIP_TESTS=true
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --estimate)
+      ESTIMATE=true
+      ;;
+    --dry)
+      DRY=true
+      ;;
+    --offline)
+      OFFLINE=true
+      ;;
+    --replay)
+      REPLAY=true
+      ;;
+    --dict)
+      SHOW_DICT=true
+      ;;
+    --metrics)
+      SHOW_METRICS=true
+      ;;
+    --grid)
+      SHOW_GRID=true
+      ;;
+    --relations)
+      SHOW_REL=true
+      ;;
+    --topics)
+      SHOW_TOPICS=true
+      ;;
+    --audit)
+      SHOW_AUDIT=true
+      ;;
+    --inspect)
+      SHOW_INSPECT=true
+      ;;
+    --hotspots)
+      SHOW_HOTSPOTS=true
+      ;;
+    --stale)
+      SHOW_STALE=true
+      ;;
+    --lint)
+      SHOW_LINT=true
+      ;;
+    --fix)
+      SHOW_LINT=true
+      FIX=true
+      ;;
+    --baseline)
+      RUN_BASELINE=true
+      ;;
+    --start)
+      RUN_START=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      ARGS+=("$arg")
+      ;;
+  esac
+done
+
+ROLE=""
+GOAL=""
+CONS=""
+REASON=""
+OUT=""
+RAW=""
+TOPICS=""
+MODEL="${CX_MODEL:-gpt-3.5-turbo}"
+TEMP="${CX_TEMP:-0.7}"
+project=$(basename "$(pwd)")
+
+for pair in "${ARGS[@]}"; do
+  key="${pair%%=*}"
+  value="${pair#*=}"
+  case "$key" in
+    role) ROLE="$value" ;;
+    goal) GOAL="$value" ;;
+    cons|constraints) CONS="$value" ;;
+    reason|reasons) REASON="$value" ;;
+    out|output) OUT="$value" ;;
+    raw|R) RAW="$value" ;;
+    topic|topics) TOPICS="$value" ;;
+    model) MODEL="$value" ;;
+    temp|temperature) TEMP="$value" ;;
+    *) echo "Unknown arg: $key" >&2 ;;
+  esac
+done
+
+if $RUN_START; then
+  run_start_suite
+  exit $?
+fi
+
+if $RUN_BASELINE; then
+  run_baseline_suite
+  exit $?
+fi
+
+if $SHOW_TOPICS; then
+  dir="$CX_HOME/topics"
+  shopt -s nullglob
+  files=("$dir"/*.log)
+  if (( ${#files[@]} == 0 )); then
+    echo "No topics logged" >&2
+  else
+    for f in "${files[@]}"; do
+      topic=$(basename "$f" .log)
+      count=$(wc -l < "$f")
+      echo "$topic $count"
+    done
+  fi
+  exit 0
+fi
+
+if $REPLAY; then
+  dir="$CX_HOME/offline"
+  shopt -s nullglob globstar
+  files=("$dir"/**/*.txt)
+  if (( ${#files[@]} == 0 )); then
+    echo "No offline prompts to replay" >&2
+    exit 0
+  fi
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    read -s -p "Enter OpenAI API key: " OPENAI_API_KEY
+    echo
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+      echo "API key required for replay" >&2
+      exit 1
+    fi
+    export OPENAI_API_KEY
+  fi
+  for f in "${files[@]}"; do
+    prompt=$(cat "$f")
+    if response=$(OPENAI_PROMPT="$prompt" MODEL="$MODEL" TEMP="$TEMP" python3 - <<'PY'
+import os, json, urllib.request, urllib.error, sys
+prompt = os.environ['OPENAI_PROMPT']
+key = os.environ['OPENAI_API_KEY']
+model = os.environ.get('MODEL', 'gpt-3.5-turbo')
+temp = float(os.environ.get('TEMP', '0.7'))
+data = json.dumps({"model": model, "temperature": temp, "messages": [{"role": "user", "content": prompt}]})
+req = urllib.request.Request(
+    'https://api.openai.com/v1/chat/completions',
+    data=data.encode(),
+    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        out = json.load(resp)
+    print(out['choices'][0]['message']['content'])
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+PY
+    ); then
+      printf '%s\n' "$response"
+      rm "$f"
+      rmdir -p "$(dirname "$f")" 2>/dev/null || true
+      echo "Replayed and removed $f" >&2
+    else
+      echo "Failed to replay $f; leaving in queue" >&2
+    fi
+  done
+  exit 0
+fi
+
+if $SHOW_METRICS; then
+  file="$CX_HOME/metrics/$project.log"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    echo "No metrics log for $project" >&2
+  fi
+  exit 0
+fi
+
+if $SHOW_GRID; then
+  file="$CX_HOME/grid/$project.grid"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    echo "No grid for $project" >&2
+  fi
+  exit 0
+fi
+
+if $SHOW_LINT; then
+  status=0
+  { git ls-files 2>/dev/null || find . -type f; } | while read -r f; do
+    case "$f" in
+      *.sh|cx|cx5)
+        bash -n "$f" || status=1
+        if command -v shellcheck >/dev/null 2>&1; then
+          shellcheck "$f" || status=1
+        fi
+        ;;
+      *.ps1)
+        if command -v pwsh >/dev/null 2>&1; then
+          pwsh -NoLogo -NoProfile -Command "[System.Management.Automation.Language.Parser]::ParseFile('$PWD/$f',[ref]$null,[ref]$e); if($e.Count -gt 0){$e; exit 1}" || status=1
+        elif command -v powershell >/dev/null 2>&1; then
+          powershell -NoLogo -NoProfile -Command "[System.Management.Automation.Language.Parser]::ParseFile('$PWD/$f',[ref]$null,[ref]$e); if($e.Count -gt 0){$e; exit 1}" || status=1
+        else
+          echo "Skipping $f: PowerShell not found" >&2
+        fi
+        ;;
+      *.py)
+        if command -v python >/dev/null 2>&1; then
+          python -m py_compile "$f" || status=1
+        else
+          echo "Skipping $f: python not found" >&2
+        fi
+        ;;
+      *.js|*.mjs|*.cjs)
+        if command -v node >/dev/null 2>&1; then
+          node --check "$f" >/dev/null || status=1
+        else
+          echo "Skipping $f: node not found" >&2
+        fi
+        ;;
+      *.json)
+        if command -v python >/dev/null 2>&1; then
+          python -m json.tool "$f" >/dev/null || status=1
+        else
+          echo "Skipping $f: python not found" >&2
+        fi
+        ;;
+      *.yml|*.yaml)
+        if command -v python >/dev/null 2>&1; then
+          if ! python - <<'PY' "$f"; then status=1; fi
+import sys
+try:
+    import yaml
+except Exception:
+    sys.exit(0)
+with open(sys.argv[1]) as fh:
+    yaml.safe_load(fh)
+PY
+        else
+          echo "Skipping $f: python not found" >&2
+        fi
+        ;;
+      *.toml)
+        if command -v python >/dev/null 2>&1; then
+          if ! python - <<'PY' "$f"; then status=1; fi
+import sys
+try:
+    import tomllib
+except Exception:
+    import tomli as tomllib
+with open(sys.argv[1], 'rb') as fh:
+    tomllib.load(fh)
+PY
+        else
+          echo "Skipping $f: python not found" >&2
+        fi
+        ;;
+    esac
+
+    if grep -Iq . "$f"; then
+      if grep -n -E '[[:space:]]$' "$f" >/dev/null; then
+        if $FIX; then
+          sed -i 's/[ \t]*$//' "$f"
+          echo "Fixed trailing whitespace in $f" >&2
+        else
+          echo "Trailing whitespace in $f:" >&2
+          grep -n -E '[[:space:]]$' "$f" >&2
+          status=1
+        fi
+      fi
+      last=$(tail -c1 "$f" 2>/dev/null | od -An -t u1)
+      if [[ "${last//[[:space:]]/}" != "10" ]]; then
+        if $FIX; then
+          printf '\n' >> "$f"
+          echo "Added newline at end of file: $f" >&2
+        else
+          echo "No newline at end of file: $f" >&2
+          status=1
+        fi
+      fi
+      if grep -nE '^(<<<<<<<|=======|>>>>>>>)' "$f" >/dev/null; then
+        echo "Merge conflict markers in $f:" >&2
+        grep -nE '^(<<<<<<<|=======|>>>>>>>)' "$f" >&2
+        status=1
+      fi
+    fi
+  done
+  exit $status
+fi
+
+if $SHOW_AUDIT; then
+  dir="$CX_HOME/audit"
+  mkdir -p "$dir"
+  file="$dir/$project.log"
+  {
+    echo "# File line counts"
+    { git ls-files 2>/dev/null || find . -type f; } | while read -r f; do
+      [[ -f "$f" ]] || continue
+      lines=$(wc -l < "$f")
+      echo "$f $lines"
+    done
+    echo "# TODO/FIXME/BUG"
+    if command -v rg >/dev/null 2>&1; then
+      rg --color=never -n 'TODO|FIXME|BUG' || true
+    else
+      grep -RIn 'TODO\|FIXME\|BUG' . || true
+    fi
+  } | tee "$file"
+  exit 0
+fi
+
+if $SHOW_HOTSPOTS; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is required for hotspot analysis" >&2
+    exit 1
+  fi
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Hotspot analysis requires a git repository" >&2
+    exit 1
+  fi
+  raw_days=${CX_HOTSPOTS_DAYS:-90}
+  if [[ $raw_days =~ ^[0-9]+$ ]]; then
+    days=$raw_days
+  else
+    days=90
+  fi
+  raw_limit=${CX_HOTSPOTS_LIMIT:-10}
+  if [[ $raw_limit =~ ^[0-9]+$ && $raw_limit -gt 0 ]]; then
+    limit=$raw_limit
+  else
+    limit=10
+  fi
+  if ! command -v python >/dev/null 2>&1; then
+    echo "Python is required to calculate hotspots" >&2
+    exit 1
+  fi
+  declare -a since_arg=()
+  if (( days > 0 )); then
+    since_arg+=("--since=${days} days ago")
+    if [[ -z $(git rev-list "${since_arg[@]}" -1 HEAD 2>/dev/null) ]]; then
+      timestamp=$(date -u +%Y-%m-%dT%H:%MZ)
+      dir="$CX_HOME/hotspots"
+      mkdir -p "$dir"
+      log="$dir/$project.log"
+      {
+        echo "# Hotspot analysis ($timestamp UTC)"
+        echo "No commits in the last $days days."
+      } | tee "$log"
+      exit 0
+    fi
+  else
+    if [[ -z $(git rev-list -1 HEAD 2>/dev/null) ]]; then
+      timestamp=$(date -u +%Y-%m-%dT%H:%MZ)
+      dir="$CX_HOME/hotspots"
+      mkdir -p "$dir"
+      log="$dir/$project.log"
+      {
+        echo "# Hotspot analysis ($timestamp UTC)"
+        echo "Repository has no commits yet."
+      } | tee "$log"
+      exit 0
+    fi
+  fi
+  dir="$CX_HOME/hotspots"
+  mkdir -p "$dir"
+  log="$dir/$project.log"
+  timestamp=$(date -u +%Y-%m-%dT%H:%MZ)
+  tmp_input=$(mktemp)
+  if ! git log "${since_arg[@]}" --numstat --no-merges --format=$'\x1f%an\x1f' --date=short > "$tmp_input"; then
+    rm -f "$tmp_input"
+    echo "Failed to read git history for hotspot analysis" >&2
+    exit 1
+  fi
+  tmp_report=$(mktemp)
+  if ! python - "$limit" "$days" "$tmp_input" > "$tmp_report" <<'PY'
+import collections
+import sys
+
+def parse_int(value: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+limit = 10
+try:
+    limit = int(sys.argv[1])
+    if limit <= 0:
+        limit = 10
+except (IndexError, ValueError):
+    pass
+
+window = sys.argv[2] if len(sys.argv) > 2 else '0'
+history_path = sys.argv[3] if len(sys.argv) > 3 else None
+if not history_path:
+    sys.exit('Missing git history path for hotspot analysis')
+
+authors = collections.Counter()
+file_commits = collections.Counter()
+file_churn = collections.Counter()
+dir_churn = collections.Counter()
+total_commits = 0
+current_files = set()
+
+with open(history_path, 'r', encoding='utf-8', errors='ignore') as fh:
+    for raw_line in fh:
+        line = raw_line.rstrip('\n')
+        if not line:
+            continue
+        if line.startswith('\x1f'):
+            author = line.strip().strip('\x1f').strip()
+            total_commits += 1
+            if author:
+                authors[author] += 1
+            current_files = set()
+            continue
+        parts = line.split('\t')
+        if len(parts) != 3:
+            continue
+        added, removed, path = parts
+        path = path.strip()
+        if not path:
+            continue
+        if ' -> ' in path:
+            path = path.split(' -> ')[-1].strip()
+        if not path or path == '/dev/null':
+            continue
+        if path not in current_files:
+            file_commits[path] += 1
+            current_files.add(path)
+        churn = parse_int(added) + parse_int(removed)
+        file_churn[path] += churn
+        directory = path.split('/', 1)[0] if '/' in path else '.'
+        dir_churn[directory] += churn
+
+window_label = 'entire history' if window == '0' else f'last {window} days'
+print(f"Analyzed git history for the {window_label}.")
+print(f"Total commits: {total_commits}")
+print(f"Files touched: {len(file_commits)}")
+print(f"Active authors: {len(authors)}")
+print()
+print('Top authors by commit count:')
+if authors:
+    for author, count in authors.most_common(limit):
+        print(f"  {author}: {count}")
+else:
+    print('  (none)')
+print()
+print('Hot files by commit frequency:')
+if file_commits:
+    for path, count in sorted(file_commits.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]:
+        churn = file_churn.get(path, 0)
+        print(f"  {path}: {count} commits, {churn} lines touched")
+else:
+    print('  (none)')
+print()
+print('Hot files by churn (lines added+removed):')
+if file_churn:
+    for path, churn in sorted(file_churn.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]:
+        commits = file_commits.get(path, 0)
+        print(f"  {path}: {churn} lines touched across {commits} commits")
+else:
+    print('  (none)')
+print()
+print('Highest-churn directories:')
+if dir_churn:
+    for directory, churn in sorted(dir_churn.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]:
+        print(f"  {directory}: {churn} lines touched")
+else:
+    print('  (none)')
+PY
+  then
+    rm -f "$tmp_input" "$tmp_report"
+    echo "Failed to compute hotspot report" >&2
+    exit 1
+  fi
+  rm -f "$tmp_input"
+  {
+    echo "# Hotspot analysis ($timestamp UTC)"
+    cat "$tmp_report"
+  } | tee "$log"
+  rm -f "$tmp_report"
+  exit 0
+fi
+
+if $SHOW_STALE; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is required for stale analysis" >&2
+    exit 1
+  fi
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Stale analysis requires a git repository" >&2
+    exit 1
+  fi
+  if [[ -z $(git rev-list -1 HEAD 2>/dev/null) ]]; then
+    timestamp=$(date -u +%Y-%m-%dT%H:%MZ)
+    dir="$CX_HOME/stale"
+    mkdir -p "$dir"
+    log="$dir/$project.log"
+    {
+      echo "# Stale files analysis ($timestamp UTC)"
+      echo "Repository has no commits yet."
+    } | tee "$log"
+    exit 0
+  fi
+  raw_min_age=${CX_STALE_MIN_AGE:-180}
+  if [[ $raw_min_age =~ ^[0-9]+$ ]]; then
+    min_age=$raw_min_age
+  else
+    min_age=180
+  fi
+  raw_limit=${CX_STALE_LIMIT:-20}
+  if [[ $raw_limit =~ ^[0-9]+$ && $raw_limit -gt 0 ]]; then
+    stale_limit=$raw_limit
+  else
+    stale_limit=20
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required for stale analysis" >&2
+    exit 1
+  fi
+  dir="$CX_HOME/stale"
+  mkdir -p "$dir"
+  log="$dir/$project.log"
+  if ! python3 - "$min_age" "$stale_limit" <<'PY' | tee "$log"
+from datetime import datetime, timezone
+import subprocess
+import sys
+import time
+
+def main() -> int:
+    try:
+        min_age = int(sys.argv[1])
+    except (IndexError, ValueError):
+        min_age = 180
+    try:
+        limit = int(sys.argv[2])
+    except (IndexError, ValueError):
+        limit = 20
+    if limit <= 0:
+        limit = 20
+    now = int(time.time())
+    min_age_seconds = max(0, min_age) * 86400
+    try:
+        tracked_raw = subprocess.check_output([
+            "git",
+            "ls-files",
+        ], text=True)
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(exc.output)
+        return 1
+    tracked = {
+        line.strip()
+        for line in tracked_raw.splitlines()
+        if line.strip()
+    }
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    print(f"# Stale files analysis ({timestamp} UTC)")
+    print(f"# Minimum age: {min_age} days | Showing up to {limit} entries")
+    if not tracked:
+        print("Repository has no tracked files yet.")
+        return 0
+    try:
+        log_raw = subprocess.check_output([
+            "git",
+            "log",
+            "--name-only",
+            "--format=%ct\t%H\t%an",
+        ], text=True)
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(exc.output)
+        return 1
+    seen = {}
+    current = None
+    for raw_line in log_raw.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            current = None
+            continue
+        parts = raw_line.split('\t')
+        if len(parts) >= 3 and parts[0].isdigit():
+            try:
+                commit_time = int(parts[0])
+            except ValueError:
+                current = None
+                continue
+            commit_hash = parts[1]
+            author = parts[2]
+            current = (commit_time, commit_hash, author)
+            continue
+        path = stripped
+        if path not in tracked:
+            continue
+        if current and path not in seen:
+            seen[path] = current
+    rows = []
+    for path, (commit_time, commit_hash, author) in seen.items():
+        age = now - commit_time
+        if age < min_age_seconds:
+            continue
+        rows.append((age, commit_time, commit_hash, author, path))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    print("Age(days)  Last Commit  Commit  Author  Path")
+    if not rows:
+        print(f"No tracked files older than {min_age} days.")
+        return 0
+    for age, commit_time, commit_hash, author, path in rows[:limit]:
+        age_days = age // 86400
+        commit_date = datetime.fromtimestamp(commit_time, tz=timezone.utc).strftime("%Y-%m-%d")
+        short_hash = commit_hash[:7]
+        print(f"{age_days:>9}  {commit_date}  {short_hash:<7}  {author}  {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  then
+    echo "Failed to analyze stale files" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if $SHOW_INSPECT; then
+  tmp_sizes=$(mktemp)
+  trap 'rm -f "$tmp_sizes"' EXIT
+  declare -A EXT_COUNTS=()
+  declare -A EXT_LINES=()
+  declare -A DIR_COUNTS=()
+  declare -A DIR_LINES=()
+  total_files=0
+  total_lines=0
+  inside_git=false
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    inside_git=true
+  fi
+
+  file_iter() {
+    if $inside_git; then
+      git ls-files -z
+    else
+      find . -type f -print0
+    fi
+  }
+
+  while IFS= read -r -d '' f; do
+    [[ -f "$f" ]] || continue
+    (( total_files++ ))
+    rel=${f#./}
+    [[ -n "$rel" ]] || rel="$f"
+    lines=$(wc -l < "$f" 2>/dev/null || echo 0)
+    size=$(wc -c < "$f" 2>/dev/null || echo 0)
+    total_lines=$(( total_lines + lines ))
+
+    base=${rel##*/}
+    ext="(none)"
+    if [[ "$base" == *.* && "$base" != .* ]]; then
+      ext=${base##*.}
+    elif [[ "$base" == .* && "$base" == *.*.* ]]; then
+      ext=${base##*.}
+    fi
+    ext=${ext,,}
+    EXT_COUNTS["$ext"]=$(( ${EXT_COUNTS[$ext]:-0} + 1 ))
+    EXT_LINES["$ext"]=$(( ${EXT_LINES[$ext]:-0} + lines ))
+
+    top_dir="."
+    trimmed=${rel#./}
+    if [[ "$trimmed" == */* ]]; then
+      top_dir=${trimmed%%/*}
+    fi
+    DIR_COUNTS["$top_dir"]=$(( ${DIR_COUNTS[$top_dir]:-0} + 1 ))
+    DIR_LINES["$top_dir"]=$(( ${DIR_LINES[$top_dir]:-0} + lines ))
+
+    printf '%s\t%s\t%s\n' "$size" "$lines" "$rel" >> "$tmp_sizes"
+  done < <(file_iter) || true
+
+  inspect_dir="$CX_HOME/inspect"
+  mkdir -p "$inspect_dir"
+  log="$inspect_dir/$project.log"
+  timestamp=$(date -u +%Y-%m-%dT%H:%MZ)
+
+  if (( total_files == 0 )); then
+    {
+      echo "# Repository inspection ($timestamp UTC)"
+      echo "No files found to inspect."
+    } | tee "$log"
+    exit 0
+  fi
+
+  format_count_lines() {
+    if (( $# == 0 )); then
+      echo "(none)"
+      return
+    fi
+    printf '%s\n' "$@" | while IFS=$'\t' read -r count lines name; do
+      printf '%-12s files=%s lines=%s\n' "$name" "$count" "$lines"
+    done
+  }
+
+  ext_summary=()
+  if (( ${#EXT_COUNTS[@]} )); then
+    while IFS= read -r line; do
+      ext_summary+=("$line")
+    done < <(
+      for ext in "${!EXT_COUNTS[@]}"; do
+        printf '%s\t%s\t%s\n' "${EXT_COUNTS[$ext]}" "${EXT_LINES[$ext]}" "$ext"
+      done | sort -k1,1nr -k2,2nr | head -n 10
+    )
+  fi
+
+  dir_summary=()
+  if (( ${#DIR_COUNTS[@]} )); then
+    while IFS= read -r line; do
+      dir_summary+=("$line")
+    done < <(
+      for dir in "${!DIR_COUNTS[@]}"; do
+        printf '%s\t%s\t%s\n' "${DIR_COUNTS[$dir]}" "${DIR_LINES[$dir]}" "$dir"
+      done | sort -k2,2nr -k1,1nr | head -n 10
+    )
+  fi
+
+  largest_files=$(sort -k1,1nr "$tmp_sizes" | head -n 10)
+
+  if $inside_git; then
+    todo_output=$(git grep -n 'TODO\|FIXME\|BUG' 2>/dev/null || true)
+    conflict_output=$(git grep -nE '^[[:space:]]*<<<<<<< ' 2>/dev/null || true)
+    debug_output=$(git grep -nE 'console\\.log|debugger;|pdb\\.set_trace|ipdb\\.set_trace' -- '*.js' '*.jsx' '*.ts' '*.tsx' '*.mjs' '*.cjs' '*.py' 2>/dev/null || true)
+  else
+    todo_output=$(grep -RIn 'TODO\|FIXME\|BUG' . 2>/dev/null || true)
+    conflict_output=$(grep -RInE '^[[:space:]]*<<<<<<< ' . 2>/dev/null || true)
+    debug_output=$(grep -RInE 'console\\.log|debugger;|pdb\\.set_trace|ipdb\\.set_trace' . --include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx' --include='*.mjs' --include='*.cjs' --include='*.py' 2>/dev/null || true)
+  fi
+
+  todo_output=$(printf '%s\n' "$todo_output" | sed '/^$/d')
+  todo_count=$(printf '%s\n' "$todo_output" | sed '/^$/d' | wc -l | tr -d ' ')
+
+  conflict_output=$(printf '%s\n' "$conflict_output" | sed '/^$/d')
+  conflict_count=$(printf '%s\n' "$conflict_output" | sed '/^$/d' | wc -l | tr -d ' ')
+
+  debug_output=$(printf '%s\n' "$debug_output" | sed '/^$/d')
+  debug_count=$(printf '%s\n' "$debug_output" | sed '/^$/d' | wc -l | tr -d ' ')
+
+  {
+    echo "# Repository inspection ($timestamp UTC)"
+    echo "Total tracked files: $total_files"
+    echo "Total lines of code: $total_lines"
+    echo
+    echo "## Files by extension (top 10 by file count)"
+    if (( ${#ext_summary[@]} )); then
+      format_count_lines "${ext_summary[@]}"
+    else
+      echo "(none)"
+    fi
+    echo
+    echo "## Top directories by line count"
+    if (( ${#dir_summary[@]} )); then
+      format_count_lines "${dir_summary[@]}"
+    else
+      echo "(none)"
+    fi
+    echo
+    echo "## Largest files (top 10 by bytes)"
+    if [[ -n "$largest_files" ]]; then
+      printf '%s\n' "$largest_files" | while IFS=$'\t' read -r size lines path; do
+        printf '%-40s size=%sB lines=%s\n' "$path" "$size" "$lines"
+      done
+    else
+      echo "(none)"
+    fi
+    echo
+    echo "## TODO / FIXME / BUG markers ($todo_count matches)"
+    if [[ -n "$todo_output" ]]; then
+      printf '%s\n' "$todo_output" | head -n 10
+      [[ $todo_count -gt 10 ]] && echo "..."
+    else
+      echo "None found."
+    fi
+    echo
+    echo "## Merge conflict markers ($conflict_count matches)"
+    if [[ -n "$conflict_output" ]]; then
+      printf '%s\n' "$conflict_output" | head -n 10
+      [[ $conflict_count -gt 10 ]] && echo "..."
+    else
+      echo "None found."
+    fi
+    echo
+    echo "## Potential debug statements ($debug_count matches)"
+    if [[ -n "$debug_output" ]]; then
+      printf '%s\n' "$debug_output" | head -n 10
+      [[ $debug_count -gt 10 ]] && echo "..."
+    else
+      echo "None found."
+    fi
+  } | tee "$log"
+  exit 0
+fi
+
+if ! $SHOW_DICT && ! $SHOW_REL && [[ -z "$ROLE" || -z "$GOAL" ]]; then
+  usage
+  exit 1
+fi
+
+if $ESTIMATE; then
+  DRY=true
+fi
+
+# Load dictionary entries and usage counts
+declare -A DICT
+declare -A USAGE
+declare -A SESSION_SYMS
+load_dict() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    DICT["$k"]="$v"
+  done < "$file"
+}
+load_usage() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    USAGE["$k"]="$v"
+  done < "$file"
+}
+
+load_dict "$CX_HOME/dict"
+load_dict ".cx/dict"
+load_usage ".cx/usage"
+
+# Summarize symbol usage for context
+usage_report() {
+  local usage_file="$1"
+  local dict_file="$2"
+  [[ -f "$usage_file" ]] || return 0
+  local avg=$(awk -F= '{s+=$2} END{if(NR>0) printf "%.2f", s/NR; else print 0}' "$usage_file")
+  local total_used=$(wc -l < "$usage_file")
+  local total_dict=$total_used
+  local unused=0
+  if [[ -f "$dict_file" ]]; then
+    total_dict=$(wc -l < "$dict_file")
+    local used_syms=$(cut -d '=' -f1 "$usage_file" | sort | uniq | wc -l)
+    unused=$(( total_dict - used_syms ))
+  fi
+  echo "Total symbols: $total_dict, used: $total_used, unused: $unused, avg use: $avg" >&2
+  echo "Top symbols:" >&2
+  while IFS='=' read -r sym count; do
+    local phrase="${DICT[$sym]}"
+    echo "$sym -> $phrase ($count)" >&2
+  done < <(sort -t '=' -k2 -nr "$usage_file" | head -n 5)
+  echo "Least-used symbols:" >&2
+  while IFS='=' read -r sym count; do
+    local phrase="${DICT[$sym]}"
+    echo "$sym -> $phrase ($count)" >&2
+  done < <(sort -t '=' -k2 -n "$usage_file" | head -n 5)
+}
+
+relation_report() {
+  local file="$CX_HOME/relations"
+  [[ -f "$file" ]] || { echo "No relations log for $project" >&2; return 0; }
+  local fd="${1:-2}"
+  {
+    echo "Top symbol pairs:"
+    awk -F= 'BEGIN{OFS="="}{n=split($1,a,","); if(n==2) print $0}' "$file" | sort -t '=' -k2 -nr | head -n 5
+    echo "Top symbol triads:"
+    awk -F= 'BEGIN{OFS="="}{n=split($1,a,","); if(n==3) print $0}' "$file" | sort -t '=' -k2 -nr | head -n 5
+  } >&$fd
+}
+
+suggest_relation_tags() {
+  local file="$CX_HOME/relations"
+  [[ -f "$file" ]] || return 0
+  local threshold=${CX_REL_SUGGEST:-3}
+  while IFS='=' read -r combo count; do
+    (( count < threshold )) && continue
+    IFS=',' read -r a b c <<<"$combo"
+    [[ -n "$c" ]] || continue
+    local phrase="${DICT[$a]}, ${DICT[$b]}, ${DICT[$c]}"
+    local exists=0
+    for val in "${DICT[@]}"; do
+      [[ "$val" == "$phrase" ]] && { exists=1; break; }
+    done
+    (( exists )) && continue
+    read -p "Mint tag for frequent triad $combo ($count uses)? Enter @tag or blank to skip: " tag
+    if [[ $tag == @* ]]; then
+      mkdir -p .cx
+      echo "$tag=$phrase" >> .cx/dict
+      DICT["$tag"]="$phrase"
+      USAGE["$tag"]=${USAGE[$tag]:-0}
+      {
+        for k in "${!USAGE[@]}"; do
+          echo "$k=${USAGE[$k]}"
+        done
+      } | sort > .cx/usage
+      usage_report .cx/usage .cx/dict
+      analyze_prune .cx/dict
+    fi
+  done < "$file"
+}
+
+if $SHOW_REL; then
+  relation_report 1
+  exit 0
+fi
+
+# Offer dynamic pruning with contextual analysis
+analyze_prune() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  local usage_file="$(dirname "$file")/usage"
+  local lines=$(wc -l < "$file")
+  local hint="${CX_DICT_MAX:-0}"
+  (( hint > 0 && lines > hint )) || return 0
+  echo "Dictionary has $lines entries (limit $hint)" >&2
+  if [[ -f "$usage_file" ]]; then
+    echo "Least-used candidates:" >&2
+    sort -t '=' -k2 -n "$usage_file" | head -n 5 >&2
+  fi
+  read -p "Prune dictionary? Enter max entries to keep (blank to skip): " max
+  [[ -n "$max" ]] || return 0
+  if (( max < lines )); then
+    if [[ -f "$usage_file" ]]; then
+      cut -d '=' -f1 "$file" > "$file.syms"
+      sort -t '=' -k2 -nr "$usage_file" | cut -d '=' -f1 | grep -F -f "$file.syms" | head -n "$max" > "$file.keep"
+      grep -F -f "$file.keep" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+      grep -F -f "$file.keep" "$usage_file" > "$usage_file.tmp" && mv "$usage_file.tmp" "$usage_file"
+      rm "$file.keep" "$file.syms"
+    else
+      tail -n "$max" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    fi
+    echo "Pruned to $max entries" >&2
+  fi
+}
+
+# Show dictionary and usage counts
+if $SHOW_DICT; then
+  usage_report .cx/usage .cx/dict
+  relation_report 2
+  for sym in $(printf '%s\n' "${!DICT[@]}" | sort); do
+    echo "$sym -> ${DICT[$sym]} (${USAGE[$sym]:-0})"
+  done
+  exit 0
+fi
+
+# Expand ^st{N} to ^stN before symbol checks
+global_expand_st() {
+  printf '%s' "$1" | sed -E 's/\^st\{([0-9]+)\}/^st\1/g'
+}
+ROLE=$(global_expand_st "$ROLE")
+GOAL=$(global_expand_st "$GOAL")
+CONS=$(global_expand_st "$CONS")
+REASON=$(global_expand_st "$REASON")
+OUT=$(global_expand_st "$OUT")
+RAW=$(global_expand_st "$RAW")
+
+# Fold raw terms into goal or constraints
+if [[ -n "$RAW" ]]; then
+  IFS=';' read -ra RAW_PARTS <<< "$RAW"
+  for part in "${RAW_PARTS[@]}"; do
+    part=$(printf '%s' "$part" | xargs)
+    case "$part" in
+      g:*|goal:*)
+        part=${part#*:}
+        GOAL="${GOAL}${GOAL:+, }$part"
+        ;;
+      c:*|cons:*)
+        part=${part#*:}
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+      *)
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+    esac
+  done
+fi
+
+# Normalize comma spacing early for deterministic tokens
+global_norm_commas() {
+  printf '%s' "$1" | sed -E 's/ *, */,/g; s/,/, /g'
+}
+CONS=$(global_norm_commas "$CONS")
+REASON=$(global_norm_commas "$REASON")
+GOAL=$(global_norm_commas "$GOAL")
+
+# Auto-mint domain tags for repeated phrases
+auto_mint_tags() {
+  local text="$1"
+  local lower=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')
+  local repeats=$(printf '%s' "$lower" |
+    tr -s ' ' '\n' |
+    awk '{w[NR]=$0} END{for(i=1;i<NR;i++){p=w[i]" "w[i+1];c[p]++} for(p in c) if(c[p]>1) print p}')
+  mapfile -t phrases <<< "$repeats"
+  for phrase in "${phrases[@]}"; do
+    [[ -z "$phrase" ]] && continue
+    local found=0
+    for val in "${DICT[@]}"; do
+      if [[ "$val" == "$phrase" ]]; then
+        found=1
+        break
+      fi
+    done
+    [[ $found -eq 1 ]] && continue
+    read -p "Mint tag for \"$phrase\"? Enter @tag or blank to skip: " tag
+    if [[ $tag == @* ]]; then
+      mkdir -p .cx
+      echo "$tag=$phrase" >> .cx/dict
+      DICT["$tag"]="$phrase"
+      USAGE["$tag"]=$(( ${USAGE[$tag]:-0} + 1 ))
+      {
+        for k in "${!USAGE[@]}"; do
+          echo "$k=${USAGE[$k]}"
+        done
+      } | sort > .cx/usage
+      usage_report .cx/usage .cx/dict
+      analyze_prune .cx/dict
+    fi
+  done
+}
+
+mine_response_log() {
+  local log="$CX_HOME/responses/$project.log"
+  [[ -f "$log" ]] || return 0
+  auto_mint_tags "$(cat "$log")"
+}
+
+mine_prompt_log() {
+  local log="$CX_HOME/prompts/$project.log"
+  [[ -f "$log" ]] || return 0
+  auto_mint_tags "$(cat "$log")"
+}
+
+mine_offline_prompts() {
+  local dir="$CX_HOME/offline/$project"
+  [[ -d "$dir" ]] || return 0
+  local combined
+  combined=$(cat "$dir"/*.txt 2>/dev/null || true)
+  [[ -n "$combined" ]] || return 0
+  auto_mint_tags "$combined"
+}
+
+mine_context_logs() {
+  local dir="$CX_HOME/context"
+  [[ -d "$dir" ]] || return 0
+  local combined=""
+  for sym in "$@"; do
+    local f="$dir/$sym.log"
+    [[ -f "$f" ]] || continue
+    combined+=$'\n'"$(awk -F'text=' '{print $2}' "$f")"
+  done
+  [[ -n "$combined" ]] || return 0
+  auto_mint_tags "$combined"
+}
+
+auto_mint_tags "$ROLE $GOAL $CONS $REASON $OUT"
+mine_response_log
+mine_prompt_log
+mine_offline_prompts
+
+# Preserve symbolized fields before replacement for token estimates
+ROLE_ORIG="$ROLE"
+GOAL_ORIG="$GOAL"
+CONS_ORIG="$CONS"
+REASON_ORIG="$REASON"
+OUT_ORIG="$OUT"
+
+# Prompt for undefined symbols and numeric macros and persist them
+symbols=$(printf '%s %s %s %s %s' "$ROLE" "$GOAL" "$CONS" "$REASON" "$OUT" | grep -oE '[@^#][A-Za-z0-9_]+' | sort -u)
+mine_context_logs $symbols
+for sym in $symbols; do
+  if [[ -z "${DICT[$sym]+x}" ]]; then
+    read -p "Define $sym: " def
+    if [[ -n "$def" ]]; then
+      mkdir -p .cx
+      echo "$sym=$def" >> .cx/dict
+      DICT["$sym"]="$def"
+      USAGE["$sym"]=$(( ${USAGE[$sym]:-0} + 1 ))
+    fi
+  else
+    USAGE["$sym"]=$(( ${USAGE[$sym]:-0} + 1 ))
+  fi
+done
+
+if [[ ${#USAGE[@]} -gt 0 ]]; then
+  mkdir -p .cx
+  {
+    for k in "${!USAGE[@]}"; do
+      echo "$k=${USAGE[$k]}"
+    done
+  } | sort > .cx/usage
+  usage_report .cx/usage .cx/dict
+  relation_report
+  analyze_prune .cx/dict
+fi
+
+# Sort keys by length for longest-first replacements
+set +u
+if [ ${#DICT[@]} -gt 0 ]; then
+  sorted_keys=$(printf '%s\n' "${!DICT[@]}" | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-)
+else
+  sorted_keys=""
+fi
+set -u
+
+replace_dict() {
+  local text="$1"
+  for k in $sorted_keys; do
+    v="${DICT[$k]}"
+    esc_k=$(printf '%s' "$k" | sed -e 's/[.[\\*^$&/]/\\&/g')
+    text=$(printf '%s' "$text" | sed -e "s/$esc_k/$v/g")
+  done
+  printf '%s' "$text"
+}
+
+# Log usage context for each symbol
+log_symbol_context() {
+  local field="$1"
+  local orig="$2"
+  local expanded="$3"
+  local timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+  local syms=$(printf '%s' "$orig" | grep -oE '[@^#][A-Za-z0-9_]+' | sort -u)
+  for sym in $syms; do
+    mkdir -p "$CX_HOME/context"
+    printf '[%s] field=%s text=%s\n' "$timestamp" "$field" "$expanded" >> "$CX_HOME/context/${sym}.log"
+    SESSION_SYMS["$sym"]=1
+    if [[ -n "$TOPICS" ]]; then
+      IFS=',' read -ra topic_arr <<< "$TOPICS"
+      mkdir -p "$CX_HOME/topics"
+      for topic in "${topic_arr[@]}"; do
+        printf '[%s] topic=%s symbol=%s field=%s text=%s\n' "$timestamp" "$topic" "$sym" "$field" "$expanded" >> "$CX_HOME/topics/${topic}.log"
+      done
+    fi
+  done
+}
+
+log_symbol_relations() {
+  local file="$CX_HOME/relations"
+  mkdir -p "$(dirname "$file")"
+  declare -A combos
+  if [[ -f "$file" ]]; then
+    while IFS='=' read -r combo count; do
+      [[ -n "$combo" ]] || continue
+      combos["$combo"]="$count"
+    done < "$file"
+  fi
+  local syms=(${!SESSION_SYMS[@]})
+  local limit=${CX_REL_SYMBOLS:-9}
+  if (( ${#syms[@]} > limit )); then
+    syms=("${syms[@]:0:limit}")
+  fi
+  local i j k combo
+  for ((i=0; i<${#syms[@]}-1; i++)); do
+    for ((j=i+1; j<${#syms[@]}; j++)); do
+      combo="${syms[i]},${syms[j]}"
+      combos["$combo"]=$(( ${combos["$combo"]:-0} + 1 ))
+    done
+  done
+  for ((i=0; i<${#syms[@]}-2; i++)); do
+    for ((j=i+1; j<${#syms[@]}-1; j++)); do
+      for ((k=j+1; k<${#syms[@]}; k++)); do
+        combo="${syms[i]},${syms[j]},${syms[k]}"
+        combos["$combo"]=$(( ${combos["$combo"]:-0} + 1 ))
+      done
+    done
+  done
+  {
+    for c in "${!combos[@]}"; do
+      echo "$c=${combos[$c]}"
+    done
+  } | sort > "$file"
+}
+
+# Maintain a neuron-like grid mapping symbols to weighted neighbors
+update_symbol_grid() {
+  local dir="$CX_HOME/grid"
+  mkdir -p "$dir"
+  local file="$dir/$project.grid"
+  declare -A grid
+  if [[ -f "$file" ]]; then
+    while IFS=':' read -r center neighbors; do
+      [[ -n "$center" ]] || continue
+      grid["$center"]="$neighbors"
+    done < "$file"
+  fi
+  local syms=(${!SESSION_SYMS[@]})
+  local limit=${CX_REL_SYMBOLS:-9}
+  if (( ${#syms[@]} > limit )); then
+    syms=("${syms[@]:0:limit}")
+  fi
+  local i j center n neighbors token name count
+  for ((i=0; i<${#syms[@]}; i++)); do
+    center="${syms[i]}"
+    declare -A counts=()
+    neighbors="${grid[$center]-}"
+    for token in $neighbors; do
+      name="${token%%=*}"
+      count="${token##*=}"
+      counts[$name]=$count
+    done
+    for ((j=0; j<${#syms[@]}; j++)); do
+      (( i == j )) && continue
+      n="${syms[j]}"
+      ((counts[$n]++))
+    done
+    local sorted=$(for name in "${!counts[@]}"; do echo "${counts[$name]} $name"; done | sort -rn | head -n8)
+    neighbors=""
+    while read -r c n; do
+      neighbors+="$n=$c "
+    done <<< "$sorted"
+    neighbors="${neighbors% }"
+    grid["$center"]="$neighbors"
+  done
+  {
+    for c in "${!grid[@]}"; do
+      echo "$c:${grid[$c]}"
+    done
+  } > "$file"
+}
+
+ROLE=$(replace_dict "$ROLE")
+GOAL=$(replace_dict "$GOAL")
+CONS=$(replace_dict "$CONS")
+REASON=$(replace_dict "$REASON")
+OUT=$(replace_dict "$OUT")
+
+# Record context for symbols used in each field
+log_symbol_context role "$ROLE_ORIG" "$ROLE"
+log_symbol_context goal "$GOAL_ORIG" "$GOAL"
+log_symbol_context cons "$CONS_ORIG" "$CONS"
+log_symbol_context reason "$REASON_ORIG" "$REASON"
+log_symbol_context out "$OUT_ORIG" "$OUT"
+log_symbol_relations
+update_symbol_grid
+suggest_relation_tags
+
+prompt="Follow these instructions exactly.\n::r $ROLE\n::g $GOAL"
+[[ -n "$CONS" ]] && prompt+=$'\n'"::c $CONS"
+[[ -n "$REASON" ]] && prompt+=$'\n'"::s $REASON"
+[[ -n "$OUT" ]] && prompt+=$'\n'"::o $OUT"
+
+comp_prompt="Follow these instructions exactly.\n::r $ROLE_ORIG\n::g $GOAL_ORIG"
+[[ -n "$CONS_ORIG" ]] && comp_prompt+=$'\n'"::c $CONS_ORIG"
+[[ -n "$REASON_ORIG" ]] && comp_prompt+=$'\n'"::s $REASON_ORIG"
+[[ -n "$OUT_ORIG" ]] && comp_prompt+=$'\n'"::o $OUT_ORIG"
+
+mkdir -p "$CX_HOME/prompts"
+timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+echo "[$timestamp] $prompt" >> "$CX_HOME/prompts/$project.log"
+
+if $ESTIMATE; then
+  read raw_tokens compressed_tokens <<<"$(RAW_PROMPT="$prompt" COMP_PROMPT="$comp_prompt" MODEL="$MODEL" python3 - <<'PY'
+import os
+raw = os.environ['RAW_PROMPT']
+comp = os.environ['COMP_PROMPT']
+model = os.environ.get('MODEL', 'gpt-3.5-turbo')
+try:
+    import tiktoken
+    enc = tiktoken.encoding_for_model(model)
+    print(len(enc.encode(raw)), len(enc.encode(comp)))
+except Exception:
+    print(len(raw.split()), len(comp.split()))
+PY
+  )"
+  if [ "$raw_tokens" -gt 0 ]; then
+    savings=$(( (raw_tokens - compressed_tokens) * 100 / raw_tokens ))
+  else
+    savings=0
+  fi
+  echo "raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >&2
+  mkdir -p "$CX_HOME/metrics"
+  project=$(basename "$(pwd)")
+  timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+  echo "[$timestamp] raw=$raw_tokens compressed=$compressed_tokens savings=${savings}%" >> "$CX_HOME/metrics/$project.log"
+fi
+
+echo -e "$prompt"
+
+if ! $DRY; then
+  if ! $OFFLINE && [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    read -s -p "Enter OpenAI API key (leave blank for offline): " OPENAI_API_KEY
+    echo
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+      OFFLINE=true
+    else
+      export OPENAI_API_KEY
+    fi
+  fi
+  if $OFFLINE; then
+    mkdir -p "$CX_HOME/offline/$project"
+    timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+    file="$CX_HOME/offline/$project/$timestamp.txt"
+    printf '%s\n' "$prompt" > "$file"
+    echo "Saved prompt offline to $file" >&2
+  else
+    if ! response=$(OPENAI_PROMPT="$prompt" MODEL="$MODEL" TEMP="$TEMP" python3 - <<'PY'
+import os, json, urllib.request, urllib.error, sys
+prompt = os.environ['OPENAI_PROMPT']
+key = os.environ['OPENAI_API_KEY']
+model = os.environ.get('MODEL', 'gpt-3.5-turbo')
+temp = float(os.environ.get('TEMP', '0.7'))
+data = json.dumps({"model": model, "temperature": temp, "messages": [{"role": "user", "content": prompt}]})
+req = urllib.request.Request(
+    'https://api.openai.com/v1/chat/completions',
+    data=data.encode(),
+    headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}
+)
+try:
+    with urllib.request.urlopen(req) as resp:
+        out = json.load(resp)
+    print(out['choices'][0]['message']['content'])
+except urllib.error.HTTPError as e:
+    sys.stderr.write(e.read().decode())
+    sys.exit(1)
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+PY
+    ); then
+      mkdir -p "$CX_HOME/offline/$project"
+      timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+      file="$CX_HOME/offline/$project/$timestamp.txt"
+      printf '%s\n' "$prompt" > "$file"
+      echo "API call failed; saved prompt offline to $file" >&2
+    else
+      printf '%s\n' "$response"
+      mkdir -p "$CX_HOME/responses"
+      timestamp=$(date -u +"%Y-%m-%dT%H:%MZ")
+      echo "[$timestamp] $response" >> "$CX_HOME/responses/$project.log"
+      auto_mint_tags "$response"
+      mine_response_log
+    fi
+  fi
+fi
+
