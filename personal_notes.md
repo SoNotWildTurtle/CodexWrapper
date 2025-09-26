@@ -1,0 +1,86 @@
+# Personal Notes
+- Maintain a small, reusable dictionary of symbols for frequent domains and reasoning hints.
+- Keep prompts concise; leverage micro-codes and tags instead of verbose instructions.
+- Expand the dictionary as new projects require custom roles or hints.
+- Practice using domain shorthands like @sec, @ds, and @dev to keep prompts tiny.
+- Leverage auto-loaded per-project dictionaries and use numeric macros like #42 for policy bundles.
+- Source `~/.cx/cx-env.sh` (or `. $env:CX_HOME/cx-env.ps1`) so `CX_HOME`, PATH, and any stored `openai_api_key` load automatically; set `CX_HOME`/`CX_BIN_DIR` first if Codex assets live somewhere other than `~/.cx`.
+- Build a dry-run token estimator to measure savings before sending prompts.
+- Try adaptive symbol learning to auto-mint new domain codes.
+- Consider building tools for tracking token savings and managing per-project symbols.
+- Use the `--estimate` flag to preview token counts and `--dry` to inspect expanded prompts before sending.
+- Remember that `--estimate` implies `--dry` so token counts never trigger an API call.
+- Always provide both `role=` and `goal=`; the wrapper errors out otherwise.
+- Capture both raw and compressed token counts and note percentage savings.
+- Apply a Differentiate → Integrate workflow when encoding prompts.
+- Convert recurring concepts to symbols first; stash leftover nouns in `R` and output limits in `O`.
+- Fold any `R` raw terms back into the goal or constraints when decompressing prompts.
+- When pruning, use LFU with an LRU fallback to drop the stalest entries.
+- Pruning is optional: `CX_DICT_MAX` merely hints a limit. When exceeded, review usage statistics and choose how many entries to keep; counts live in `.cx/usage`.
+- Review the top symbol report after each run to spot new compression opportunities.
+- Run `cx --dict` to view all symbols with usage counts and monitor dictionary growth.
+- Use `cx --lint` to spot syntax errors in Bash, PowerShell, Python, Node.js, JSON, YAML, and TOML files, and to catch trailing whitespace, missing final newlines, or stray merge conflict markers before running them; pair with `--fix` to clean those issues automatically.
+- Run `cx --inspect` whenever I need a quick repository health check so I can review top extensions, busiest directories, largest files, and see whether TODOs, merge conflicts, or debug statements need attention.
+- Run `cx --hotspots` regularly to review git churn: adjust `CX_HOTSPOTS_DAYS`/`CX_HOTSPOTS_LIMIT` to find the hottest files, directories, and authors when triaging bugs.
+- Run `cx --metrics` to review token-savings history for the current project.
+- If a symbol is unfamiliar, infer meaning and ask one clarifying question at most.
+- Reuse the expander spec across chats and keep instruction blocks short.
+- Wrappers expand `^st{N}`, perform longest-first replacements, and prepend "Follow these instructions exactly.".
+- Double-check that replacements escape special characters and favor longest matches to avoid partial overlaps.
+- Auto-mint domain tags like @wpsec or @netops when patterns recur, then reuse them to keep prompts short.
+- Compare compressed vs uncompressed token counts to verify savings.
+- Ensure the `tiktoken` library is installed so `--estimate` reports accurate token counts.
+- Follow shell variable style `$name = ${name}` when crafting examples.
+- Normalize commas in constraint and reasoning lists before compression.
+- Test the full cx5 pipeline with command: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
+- Test the full cx5 pipeline and ensure dictionary phrases convert back to symbols correctly.
+- Verify the install script sets up aliases, a starter dictionary, and the decompression spec across Bash and PowerShell.
+- Ensure the installer is idempotent and writes assets to a standard `${CX_HOME:-~/.cx}` directory.
+- When working in WSL/Kali, activate the Python venv and run `install_venv.sh` so wrappers and `.cx` assets live inside the environment.
+- Prompt users to define unknown symbols so the dictionary stays current.
+- Log percentage savings from `--estimate` for each project.
+- Run the installer multiple times to confirm idempotency on different platforms and check that `${CX_HOME:-~/.cx}/metrics` is seeded.
+- Verify `--estimate` logs appear under `${CX_HOME:-~/.cx}/metrics` with raw/compressed counts and savings percent.
+- Ensure each metrics log is named after the current directory so project histories stay separate.
+- Log each `--estimate` run to `${CX_HOME:-~/.cx}/metrics/<project>.log` with a timestamp and percentage savings.
+- Keep the decompression spec stored in `${CX_HOME:-~/.cx}` handy to seed new chats quickly.
+- Double-check metrics logs include timestamp, raw count, compressed count, and percent savings.
+- Format each entry like `[2025-08-29T12:00Z] raw=123 compressed=45 savings=63%` so parsing is straightforward.
+- Pair `--dry` with `--estimate` when debugging to inspect expanded prompts and counts without sending.
+- After clarifying an unknown symbol, save the definition so the dictionary stays current.
+- Verify the installer skips overwriting existing dictionary entries and confirms `${CX_HOME:-~/.cx}/metrics` exists.
+- Keep a project-level `.cx/dict` so symbols auto-load whenever I enter the folder.
+- Review `${CX_HOME:-~/.cx}/context` logs to understand how symbols are used and refine definitions for clearer prompts.
+- Run `cx --relations` or inspect `${CX_HOME:-~/.cx}/relations` to see which symbol pairs and triads co-occur most and consider minting compound tags.
+- Review `${CX_HOME:-~/.cx}/grid/<project>.grid` periodically to see how symbols cluster around each other in 3×3 neuron blocks and how often they connect, refining definitions based on those weighted relationships.
+- Use `cx --grid` to print the current project's neuron grid and visualize these weighted connections quickly.
+- When the wrapper suggests a tag from a frequent symbol triad, evaluate and add it to the dictionary if it captures a reusable concept.
+- Use `topic=` to tag runs and review `${CX_HOME:-~/.cx}/topics` logs to see how symbols cluster by theme.
+- Run `cx --topics` to list all topics and their logged entries for a quick overview.
+- Use `cx --audit` to scan the repository for TODO or FIXME notes and record file line counts for later cleanup.
+- Use `cx --stale` to list files older than the `CX_STALE_MIN_AGE` threshold (default 180 days) so I can target refactors; bump `CX_STALE_LIMIT` if I need a longer list.
+- When I want a fast onboarding sweep, run `cx --baseline` to combine lint, audit, and inspection passes and, when git history exists, generate hotspot and stale reports in one go (add `--fix` to clean whitespace automatically).
+  - For deeper automation, run `cx --start` so baseline reports are generated and the wrapper also runs git status, Node installs plus lint/test scripts across `npm`/`yarn`/`pnpm`/`bun`, Ruby Bundler installs with `rspec`/rake tests, Composer installs with its `test` script or `vendor/bin/phpunit`, Elixir `mix deps.get`/`mix test`, Python dependency installs via Poetry/Pipenv/pip before `tox`/`pytest`, `pre-commit install --install-hooks` (when a git repo is available) and `pre-commit run --all-files`, common `just` recipes (`just install`/`just lint`/`just test`) when the CLI is present, Taskfile targets (`task install`/`task lint`/`task test`) when go-task is installed, Bazel builds/tests via `bazel`/`bazelisk`/`./bazelw`, Pants `dependencies`/`lint`/`test` through `pants` or `./pants`, `make lint`/`make test`, `.NET` `dotnet restore`/`dotnet test`, Maven dependency prep plus `mvn test`, Gradle `test`, Haskell `stack build --only-dependencies`/`stack test` or `cabal v2-build --only-dependencies`/`cabal v2-test`, Swift `swift package resolve`/`swift test`, Scala `sbt update`/`sbt test`, Flutter `flutter pub get`/`flutter test`, Dart `dart pub get`/`dart test`, configure/build CMake projects (`cmake -S . -B ${CX_CMAKE_BUILD_DIR:-build}` → `cmake --build`) before running `ctest`, `go test ./...`, and `cargo test`; set `CX_START_SKIP_INSTALL=1` or `CX_START_SKIP_TESTS=1` if those steps would be too heavy.
+  - When it's time for a full cleanup, run `cx --improve` so the wrapper lints with `--fix`, reruns project automation with installs/tests enabled (override via `CX_IMPROVE_SKIP_INSTALL`/`CX_IMPROVE_SKIP_TESTS`), executes any extras listed in `CX_IMPROVE_EXTRA`, prints git status plus a diff stat, and logs the sweep to `${CX_HOME:-~/.cx}/improve/<project>.log` for later review.
+  - When CMake projects need alternate build directories, generators, or test flags, export `CX_CMAKE_BUILD_DIR`, `CX_CMAKE_CONFIGURE_ARGS`, `CX_CMAKE_BUILD_ARGS`, `CX_CMAKE_BUILD_TARGET`, or `CX_CTEST_ARGS` before running `--start`.
+  - For Bazel projects, adjust targets or extra flags with `CX_START_BAZEL_BUILD_ARGS`, `CX_START_BAZEL_BUILD_TARGETS`, `CX_START_BAZEL_TEST_ARGS`, or `CX_START_BAZEL_TEST_TARGETS`; for Pants, tweak runs with `CX_START_PANTS_DEPS_ARGS`, `CX_START_PANTS_DEPS_TARGETS`, `CX_START_PANTS_LINT_ARGS`, `CX_START_PANTS_LINT_TARGETS`, `CX_START_PANTS_TEST_ARGS`, or `CX_START_PANTS_TEST_TARGETS`.
+  - Keep `CX_START_EXTRA_INSTALL`, `CX_START_EXTRA_TEST`, and `CX_START_EXTRA_STEPS` handy—populate them with newline-separated commands when a project needs extra install/test/cleanup automation layered onto the default flow.
+- Run `cx --locate` when entering a repository from a subdirectory so I know which path the wrapper treats as the root and which package managers or CLIs (pre-commit, just, task, Bazel, Pants, Nix, Terraform, Ansible, Docker Compose, Helm, Kustomize, Vagrant, etc.) I still need to install before `--start` can succeed.
+- If the repo declares Poetry or Pipenv files but the tools are missing, install them so the new Python dependency automation can do its job before rerunning `--start`.
+- After each run, peek at `${CX_HOME:-~/.cx}/responses/<project>.log`. The wrapper mines this log for recurring phrases, but review it to confirm and mint tags so the dictionary keeps growing.
+- Every prompt is recorded under `${CX_HOME:-~/.cx}/prompts/<project>.log` and scanned across runs; revisit it to identify recurring instructions worth symbolizing.
+
+- Set `OPENAI_API_KEY` before running without `--dry` so the wrappers can reach OpenAI and return a reply.
+
+- If the API key isn't set, be ready to enter it when prompted; the wrapper will export it for the current session.
+- Remember that `cx5` now folds `raw=` fragments into goals or constraints before compression.
+
+- If working offline or skipping the key, use `--offline` or press Enter at the key prompt; the wrapper will queue the prompt under `${CX_HOME:-~/.cx}/offline/<project>` for later.
+- Once a key is available, run `cx --replay` to send any queued prompts across project folders and clear the offline queue.
+- The wrapper now mines queued prompts under `${CX_HOME:-~/.cx}/offline` and per-symbol context logs for repeated phrases, but keep reviewing these files to grow and refine the dictionary over time.
+
+- Use `install.sh` to set up `cx` and seed `${CX_HOME:-~/.cx}` assets (plus `cx-env.{sh,ps1}` helpers) before first use.
+- If `pwsh` isn't available, try `powershell -File install.ps1`; if neither exists, install PowerShell from Microsoft's docs.
+- Usage reports now include averages and unused counts—review them after each run and only prune when explicitly confirmed; the dictionary can grow unless `CX_DICT_MAX` is set as a hint.
+- Set `model=` or export `CX_MODEL` when you need a different OpenAI model; otherwise the wrappers default to `gpt-3.5-turbo`.
+- Adjust `temp=` or set `CX_TEMP` to tune response randomness (default `0.7`).
