@@ -1,0 +1,73 @@
+# Goals
+- Build codex wrapper application supporting SYM-5 and CX5-ALG compression.
+- Implement Bash alias `cx` and `cx5` along with PowerShell `Invoke-Codex` and `Compress-CX5` functions. *(DONE)*
+- Ensure alias replacements escape special characters and sort by key length to avoid partial overlaps.
+- Add per-project dictionaries auto-loaded by folder and support for numeric macros (e.g., #42 → policy bundles). *(DONE)*
+- Create a dry-run token estimator comparing compressed versus uncompressed prompts to preview savings before sending, exposed via a `--estimate` flag. *(DONE)*
+- Provide a `--dry` option to preview the expanded prompt without sending it to the model. *(DONE)*
+- Implement adaptive symbol learning that auto-mints domain tags like @wpsec or @netops. *(DONE)*
+- Provide an automated Codex install script that configures aliases, seeds a default dictionary, and installs the decompression spec. *(DONE)*
+- Ensure installers verify python/pip, install the `tiktoken` and `openai` modules, and write `cx-env.{sh,ps1}` helpers so PATH, `CX_HOME`, and saved API keys load automatically. *(DONE)*
+- Automate Codex setup inside a WSL/Kali Python virtual environment using `install_venv.sh` so the wrapper mediates between Codex and the user. *(DONE)*
+- Honor `CX_HOME`/`CX_BIN_DIR` across wrappers so Codex assets can be relocated while keeping defaults at `${CX_HOME:-~/.cx}`. *(DONE)*
+- Add fallbacks for PowerShell scripts: try `pwsh`, then `powershell`, and prompt users to install PowerShell if both commands are missing. *(DONE)*
+- Installer should drop the decompression spec into `${CX_HOME:-~/.cx}` for easy reuse across chats. *(DONE)*
+- Track token savings metrics per project. *(DONE)*
+- Implement LFU/LRU dictionary eviction for custom symbols to keep Σ minimal. *(DONE)*
+- Add a clarifying-question mechanism to handle unknown symbols safely and update the dictionary automatically. *(DONE)*
+- Ensure the token estimator reports raw vs compressed counts and percentage savings without calling the API. *(DONE)*
+- Make the install script idempotent and drop assets in a standard `${CX_HOME:-~/.cx}` directory. *(DONE)*
+- Persist token-savings logs under `${CX_HOME:-~/.cx}/metrics` for project-level tracking. *(DONE)*
+- Derive the metrics filename from the current directory so each project logs to its own `<project>.log`. *(DONE)*
+- Normalize comma spacing in constraint and reasoning lists before compression for deterministic tokens. *(DONE)*
+- Allow combining `--estimate` with `--dry` to preview expanded prompts and token metrics simultaneously. *(DONE)*
+- Append timestamped token-savings entries to `${CX_HOME:-~/.cx}/metrics/<project>.log` for historical tracking. *(DONE)*
+- Standardize each metrics entry as `[ISO timestamp] raw=X compressed=Y savings=Z%` for easy consumption. *(DONE)*
+- Each logged entry should capture raw and compressed counts along with the percentage savings. *(DONE)*
+- Ensure the installer preserves existing dictionary entries while verifying required assets and creating a metrics subdirectory. *(DONE)*
+- Persist auto-minted domain tags to dictionaries so they can be reused across sessions. *(DONE)*
+- Teach the decompressor to fold any `R` raw terms into goal or constraint sections during expansion. *(DONE)*
+- Prompt for `OPENAI_API_KEY` when absent and export it before making API requests. *(DONE)*
+- Fold `raw=` fragments into goals or constraints within the `cx5` compressor for fuller symbolic coverage. *(DONE)*
+- Add contextual symbol usage analysis and interactive pruning: report top and least-used entries, averages, and unused counts; when `CX_DICT_MAX` is set, offer a pruning prompt that lets users choose how many entries to keep with no hard limit. *(DONE)*
+- Expose a `--dict` option to display combined dictionary entries with usage counts for review. *(DONE)*
+- Provide a `--metrics` option to show token-savings history for the current project. *(DONE)*
+- Log per-symbol usage context to `${CX_HOME:-~/.cx}/context/<symbol>.log` so understanding deepens over time. *(DONE)*
+- Provide an offline mode that queues prompts under `${CX_HOME:-~/.cx}/offline/<project>` when API calls can't be made. *(DONE)*
+- Support replaying queued prompts via `cx --replay` once connectivity and an API key are available. *(DONE)*
+- Analyze offline prompts and context logs to propose new symbols and foster long-term growth. *(DONE)*
+- Log co-occurring symbol pairs and triads (from up to nine symbols) to `${CX_HOME:-~/.cx}/relations`, expose a `--relations` flag to review top combos, and prompt for compound tags when triads recur. *(DONE)*
+- Mine the relations log to suggest compound tags from frequent symbol triads. *(DONE)*
+- Map symbol relationships into a neuron-style 3×3 grid under `${CX_HOME:-~/.cx}/grid/<project>.grid` so connections evolve like neurons. *(DONE)*
+- Extend the neuron grid to record neighbor visit counts for a weighted 3D context map. *(DONE)*
+- Expose a `--grid` option to display the neuron grid for review. *(DONE)*
+- Capture API responses and mine the full responses log each run to offer new tag suggestions from repeated phrases so Codex feedback expands the dictionary. *(DONE)*
+- Log each expanded prompt to `${CX_HOME:-~/.cx}/prompts/<project>.log` and mine the log across runs to suggest new tags from recurring instructions. *(DONE)*
+- Track symbol-topic relationships by logging topic-tagged runs under `${CX_HOME:-~/.cx}/topics` so relational meaning can grow. *(DONE)*
+- Expose a `--topics` option to list topic logs with entry counts. *(DONE)*
+- Allow selecting the OpenAI model via `model=` or `CX_MODEL` for flexible API calls. *(DONE)*
+- Allow adjusting sampling temperature via `temp=` or `CX_TEMP` for controllable randomness. *(DONE)*
+- Expose an `--audit` option that scans tracked files for line counts and TODO/FIXME markers, logging reports under `${CX_HOME:-~/.cx}/audit`. *(DONE)*
+- Add a `--lint` option that runs syntax checks on Bash, PowerShell, Python, and JavaScript files when interpreters are available to aid bug hunting. *(DONE)*
+- Extend `--lint` to validate JSON, YAML, and TOML files for malformed configs. *(DONE)*
+- Extend `--lint` to flag trailing whitespace and missing end-of-file newlines for consistent code style. *(DONE)*
+- Add a `--fix` flag so `cx --lint --fix` strips trailing whitespace and appends final newlines automatically. *(DONE)*
+- Teach `--lint` to surface leftover merge conflict markers alongside existing style checks. *(DONE)*
+- Provide a `--inspect` option that summarizes repository health (extension mix, hot directories, largest files, TODO/FIXME counts, merge conflicts, and debug statements) and logs to `${CX_HOME:-~/.cx}/inspect/<project>.log`. *(DONE)*
+- Add a `--hotspots` option that analyzes recent git history for high-churn files, noisy directories, and active authors, logging reports to `${CX_HOME:-~/.cx}/hotspots/<project>.log` with tunable lookback and list length. *(DONE)*
+- Surface long-untouched files with a `--stale` report that honors `CX_STALE_MIN_AGE`/`CX_STALE_LIMIT` and logs to `${CX_HOME:-~/.cx}/stale/<project>.log` for refactoring targets. *(DONE)*
+- Provide a `--baseline` automation mode that chains lint, audit, inspection, hotspot, and stale scans (skipping git steps when unavailable) so repositories get an actionable starting point in one command. *(DONE)*
+- Provide a `--start` mode that layers auto-detected project actions (git status, Node installs and scripts, Python `tox`/`pytest`, `make lint`/`make test`, `go test ./...`, and `cargo test`) on top of the baseline automation with opt-outs via `CX_START_SKIP_INSTALL` and `CX_START_SKIP_TESTS`. *(DONE)*
+- Add an `--improve` mode that runs the baseline suite with `--fix`, forces project automation installs/tests unless `CX_IMPROVE_SKIP_INSTALL`/`CX_IMPROVE_SKIP_TESTS` are set, executes `CX_IMPROVE_EXTRA`, prints git status and diff stats, and logs each sweep to `${CX_HOME:-~/.cx}/improve/<project>.log`. *(DONE)*
+- Document the sandbox workflow for running `./cx --improve` against CodexWrapper so the tool continuously self-evaluates between conversations. *(DONE)*
+- Capture a repeatable sandbox recipe—clone, install, optional `CX_HOME`/`CX_IMPROVE_*` overrides, run `./cx --improve`, then compare `${CX_HOME}/improve/CodexWrapper.log` entries—so every iteration measures progress and fuels self-evolution. *(DONE)*
+- Enhance `--start` to install Python dependencies automatically using Poetry, Pipenv, or pip manifests and warn when the required tools are missing. *(DONE)*
+- Extend `--start` automation to cover Ruby Bundler installs and tests, Composer installs and PHP unit tests, `.NET` restore/test runs, Maven dependency warmup plus `mvn test`, and Gradle `test` execution. *(DONE)*
+- Extend `--start` automation to detect Elixir projects (`mix deps.get`/`mix test`), Haskell projects (`stack build --only-dependencies`/`stack test` or `cabal v2-build --only-dependencies`/`cabal v2-test`), and Swift packages (`swift package resolve`/`swift test`). *(DONE)*
+- Extend `--start` automation to cover Bun-managed Node projects and run Scala `sbt update`/`sbt test`, Flutter `flutter pub get`/`flutter test`, and Dart `dart pub get`/`dart test` when Flutter tooling is absent. *(DONE)*
+- Extend `--start` automation to configure/build/test CMake projects via `cmake`/`ctest`, honoring `CX_START_SKIP_*` flags and environment overrides like `CX_CMAKE_BUILD_DIR`, `CX_CMAKE_CONFIGURE_ARGS`, `CX_CMAKE_BUILD_ARGS`, `CX_CMAKE_BUILD_TARGET`, and `CX_CTEST_ARGS`. *(DONE)*
+- Allow `--start` to run newline-delimited custom commands from `CX_START_EXTRA_INSTALL`, `CX_START_EXTRA_TEST`, and `CX_START_EXTRA_STEPS`, respecting skip flags where appropriate. *(DONE)*
+- Extend `--start` automation to handle pre-commit hooks, common `just` recipes, and go-task `Taskfile` targets while `--locate` surfaces those ecosystems in its report. *(DONE)*
+- Extend `--start` automation to build/test Bazel workspaces and run Pants dependencies/lint/test while `--locate` highlights Bazel and Pants coverage alongside prerequisites. *(DONE)*
+- Broaden `--locate` so it also spots infrastructure tooling—Nix flakes/shells, Terraform modules, Ansible playbooks, Docker Compose stacks, Helm charts, Kustomize overlays, and Vagrant environments—and reports missing CLIs for each. *(DONE)*
+- Provide a `--locate` command that identifies the repository root, lists available automation coverage, and surfaces missing prerequisites so developers know how to prepare the environment. *(DONE)*
