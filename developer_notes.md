@@ -1,0 +1,119 @@
+# Developer Notes
+
+- Implement a symbolic prompt language (SYM-5) using :: tags: r (role), g (goal), c (constraints), s (steps), e (examples), o (output).
+- Support micro-codes such as ^ts (think step-by-step), ^mm (minimal tokens), ^ck (list assumptions), ^rg (reason then answer), ^fx (hedge facts), ^st{N} (N bullet limit), ^md (concise Markdown), ^ps (pseudocode), ^cx (compressed recap), ^qa (Q&A pairs).
+- Include domain shorthands like @sec, @ds, and @dev to compress recurring personas; allow the dictionary to extend this set.
+- Support numeric macros like `#42` to expand policy bundles or other presets via dictionary entries.
+- Normalize enhancement workflows by drafting an architecture reference for each target codebase before automation and pair it with the organizational methodology playbook so discovery steps and recommendations stay consistent. Capture:
+  - Maintain a standing **Organizational Methodology Goal** that enumerates imports, functions, requirements, module responsibilities, integration seams, execution flow, and curated recommendations before any automated enhancement begins.
+  - Imports and external requirements.
+  - Key functions plus module responsibilities.
+  - Integration points inside/outside the repo.
+  - The execution path from entrypoints through automation flows.
+  Use `architecture_overview.md` as the template and keep the result linked from `goals.md` for traceability. Refresh the **Current CodexWrapper Recommendations** section in `organizational_methodology.md` with actionable follow-ups (test gaps, CI coverage, analytics ideas) whenever automation evolves so teams always know the next improvement targets, confirm the ongoing methodology dossier goal in `goals.md` stays checked in for every repo, log discovery deltas after each sweep so the guidance remains current, and verify that immediate/foundational/exploratory recommendations are captured before running automation. Do not proceed until the Methodology Summary block in `organizational_methodology.md` explicitly lists the imports, functions, requirements, module responsibilities, integration seams, execution flow, and recommendation categories for the current engagement.
+- Provide Bash alias `cx` that expands SYM-5 prompts using a dictionary and sed replacements.
+- Wrappers and docs treat `${CX_HOME:-~/.cx}` as the Codex data root; set `CX_HOME`/`CX_BIN_DIR` to relocate assets and rely on the generated `cx-env.{sh,ps1}` helpers to export PATH, dictionary paths, and stored API keys automatically.
+- Read optional config files to seed defaults: `${CX_HOME:-~/.cx}/config`, `<project>/.cx/config`, and any colon-separated paths listed in `CX_CONFIG`. Later files override earlier ones and command-line arguments always win when provided. Surface the resolved stack (active files, layered defaults, CLI overrides, and final values) with `cx --config`/`Invoke-Codex -ShowConfig`, group the layered defaults by their source file with `cx --config-list`/`Invoke-Codex -ShowConfigList`, compare scopes directly with `cx --config-diff`/`Invoke-Codex -ShowConfigDiff` when you need to highlight differing or missing keys, and drill into specific keys with `cx --config-which`/`Invoke-Codex -ShowConfigWhich` to reveal each key's default source, CLI override, environment contribution, and resolved value.
+- Snapshot the resolved defaults with `cx --config-export[=FILE]`/`Invoke-Codex -ConfigExport` (optional `-ConfigExportPath`) and merge template defaults with `cx --config-import=/path`/`Invoke-Codex -ConfigImport` before layering additional `--config-set` overrides.
+- Validate layered defaults with `cx --config-validate[=SCOPE]`/`Invoke-Codex -ConfigValidate [-ConfigValidateScope scope]` so unknown keys, empty required values, or out-of-range temperatures surface before prompting; the command exits non-zero when fixes are required, making it safe to wire into automation.
+- Manage defaults from the CLI: `cx --config-set key=value`/`--config-unset key` (or `Invoke-Codex -ConfigSet/-ConfigUnset`) update the project config by default, `--config-scope=user` targets `${CX_HOME:-~/.cx}/config`, and `--config-path=/custom/file` lets you maintain bespoke stacks. Combine with `--config`/`-ShowConfig` to review the new layers immediately.
+- Provide Bash compressors/aliases `cx` (expand) and `cx5` (compress to CX5) using dictionary-based replacements.
+- `cx5` inverts dictionaries from `${CX_HOME:-~/.cx}/dict` and `./.cx/dict`, replaces phrases with symbols longest-first, normalizes commas,
+  expands `^st{N}` to `^stN`, and emits `CX5|v=1|Σ=|F=∫(...)|R=|O=`.
+- Alias workflow: load a dictionary of personas and hints, expand `^st{N}` limits, sort keys by length for longest-first replacements, escape sed special characters, build blocks for ::r/::g/::c/::s/::e/::o via awk, and prefix "Follow these instructions exactly.".
+- Wrappers should also normalize comma spacing in constraint and reasoning lists before compression to ensure consistent tokens.
+- Provide PowerShell function `Invoke-Codex` with equivalent expansion logic (see `Invoke-Codex.ps1`).
+- PowerShell variant uses an ordered map, regex-based replacements, and a `Get-Block` helper following `$name = ${name}` style.
+- Define algorithmic compression format CX5-ALG v1: `CX5|v=1|Σ=|F=∫(... ⊕ ...)|R=|O=`.
+- Enumerate CX5-ALG operators: ∫ integrate, d[] apply delta constraints, ⊕ add, ⊗ cross/mix, ≈ similarity hint, → output, Π pipeline order, Σ summary request.
+- Design is transport-agnostic; expanded prompts can pipe into any API client.
+- Include decompression spec for ChatGPT so compressed lines can be expanded within each chat session.
+- Decompression spec should output concise Markdown with no preface, infer unknown symbols and ask at most one clarifying question, and return only the expanded instruction.
+- If `R` is present, fold raw terms into the goal or constraints during decompression.
+- The Bash `cx` wrapper accepts an optional `raw=` parameter and folds those raw terms into the goal or constraint sections before expansion.
+- Implement Bash compressor `cx5` and PowerShell `Compress-CX5` to emit CX5 strings (see `Compress-CX5.ps1`).
+- PowerShell `Compress-CX5` validates that `role` and `goal` are provided, normalizes comma spacing with `-replace`, builds the `F` string, and returns the single-line `CX5|...` output.
+- Compressors accept key=value args, normalize comma spacing in hints, build `F` via `∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})`, and emit `CX5|v=1|Σ=|F=...|R=...|O=...`.
+- Differentiate → Integrate compression:
+  - Differentiate: extract role, goal, constraints, reasoning, and output; normalize comma spacing; convert recurring ideas to symbols; stash stray nouns in `R` and format/limits in `O`; skip `Σ` when only built-ins are present.
+  - Integrate: encode the facets as `F=∫(role ⊕ goal(...) ⊕ d[constraints] ⊕ Π{reason})` and attach any `R`/`O` residuals.
+- If a domain recurs, mint a tag (e.g., @domX) and teach it once to keep future prompts short.
+- Handle unknown symbols by inferring safely and asking at most one clarifying question.
+- Wrappers should prompt the user to define unknown symbols, auto-update the on-disk dictionary, and keep future prompts concise.
+- Wrappers auto-mint domain tags by detecting repeated plain phrases and offering `@tag` definitions so recurring concepts compress well.
+- Project dictionaries track usage counts; `cx` reports top and least-used symbols, average use, and how many entries remain unused.
+- If `CX_DICT_MAX` is set and exceeded, the wrapper performs a dynamic analysis, shows usage statistics, and lets the user choose how many entries to keep—no hard limit is enforced.
+- After each run, `cx` prints a short report of the most and least-used symbols to aid contextual analysis.
+- A `--dict` flag prints the combined global and project dictionary with usage counts for quick inspection.
+- A `--metrics` flag prints the token-savings history for the current project from `${CX_HOME:-~/.cx}/metrics/<project>.log`.
+- Maintain concise Markdown output with no extra preface.
+- Future enhancements: adaptive symbol learning that auto-mints domain tags (e.g., @wpsec, @netops).
+- Token estimator should be available via a `--estimate` CLI flag to report token counts without submitting prompts.
+- Estimator should output both raw and compressed counts with a percentage savings report.
+- Estimator should also log raw/compressed counts and percentage savings under `${CX_HOME:-~/.cx}/metrics` for per-project tracking.
+- Estimator uses the `tiktoken` tokenizer when available for accurate counts and falls back to simple word splits otherwise.
+- Add a `--dry` flag to preview the expanded instruction without calling the API, useful for debugging.
+- Wrappers should validate that `role` and `goal` are provided; print a usage message otherwise.
+- `--estimate` implies a dry-run so token counts can be previewed without sending the prompt.
+- Provide a cross-platform install script that configures aliases, seeds a default dictionary, and drops the decompression spec.
+- Supply an `install_venv.sh` helper for WSL/Kali that installs wrappers into the active Python virtual environment, ensures pip dependencies, and seeds `.cx` assets plus `cx-env.sh` locally.
+- When invoking PowerShell installers, fall back to `powershell` if `pwsh` isn't available and prompt users to install PowerShell when neither command exists.
+- Installer should be idempotent, create `${CX_HOME:-~/.cx}` plus supporting subdirectories, install `tiktoken` and `openai` via pip, and verify assets on repeated runs.
+- Installer should place the decompression spec under `${CX_HOME:-~/.cx}` so users can paste it into new chats and drop `cx-env.{sh,ps1}` helpers alongside the dictionary.
+- When expanding shell variables, preserve style such as `$name` → `${name}`.
+- Reference end-to-end usage: `cx5 role=@dev goal='tiny http server in python' cons='^mm,^md,^st5' reason='^ts,^rg' out='code+bullets'.`
+- Token estimator should append timestamped entries to `${CX_HOME:-~/.cx}/metrics/<project>.log` so savings history is preserved.
+- Each metrics entry should record the timestamp, raw count, compressed count, and percentage savings for auditing.
+- The estimator should derive the `<project>` name from the current working directory when logging metrics.
+- Metrics logs should follow a readable format like `[2025-08-29T12:00Z] raw=123 compressed=45 savings=63%` for easy parsing.
+- When expanding prompts, log the final text of each symbol to `${CX_HOME:-~/.cx}/context/<symbol>.log` so its usage context accumulates over time.
+- Log co-occurring symbol pairs and triads (drawn from up to nine symbols) to `${CX_HOME:-~/.cx}/relations` each run, print the most frequent combos, and expose a `--relations` flag so developers can inspect these connections and mint compound tags.
+- When a relation triad exceeds `CX_REL_SUGGEST` (default 3) uses, prompt the user to mint a combined `@tag` from the triad's phrases so compound concepts can be reused.
+- Maintain a neuron-style grid per project under `${CX_HOME:-~/.cx}/grid/<project>.grid` where each symbol sits at the center of a 3×3 block and records up to eight neighboring symbols with usage counts so contextual relationships grow like weighted neural connections.
+- Expose a `--grid` flag to print the current project's neuron grid so developers can inspect weighted symbol neighbors.
+- Tag runs with `topic=` to map symbols to `${CX_HOME:-~/.cx}/topics/<topic>.log`, growing relational meaning between symbols and themes.
+- Use `cx --topics` to list all topic logs with entry counts.
+- Run `cx --audit` to log line counts and search for TODO/FIXME markers across tracked files, aiding bug hunts.
+- Run `cx --lint` to syntax-check Bash scripts with `bash -n` and `shellcheck` (if available), parse PowerShell scripts when `pwsh` or `powershell` is installed, check Python, JavaScript, JSON, YAML, and TOML files with appropriate Python or Node utilities when interpreters or modules are present, and warn about trailing whitespace, missing final newlines, or leftover merge conflict markers in any text file. Use `--fix` to strip trailing whitespace and append final newlines automatically.
+- Run `cx --inspect` to summarize repository health: count tracked files and lines, list top extensions and directories, surface the largest files, and capture TODO/FIXME markers, merge conflict remnants, and debug statements (e.g., `console.log`, `pdb.set_trace`), logging to `${CX_HOME:-~/.cx}/inspect/<project>.log` for later review.
+- Run `cx --hotspots` to mine git history (default last 90 days, configurable via `CX_HOTSPOTS_DAYS`/`CX_HOTSPOTS_LIMIT`) and report the busiest authors, most frequently changed files, highest-churn files, and loudest directories, storing the analysis under `${CX_HOME:-~/.cx}/hotspots/<project>.log` for bug-hunting context.
+- Run `cx --stale` to surface files whose last commit is older than `CX_STALE_MIN_AGE` days (default 180), capped at `CX_STALE_LIMIT` entries, and log the results to `${CX_HOME:-~/.cx}/stale/<project>.log` for targeted refactors.
+- Run `cx --baseline` to launch lint, audit, and inspection passes plus git-based hotspot and stale scans (skipping git steps when the repository is absent) so onboarding a codebase produces actionable logs from one command; add `--fix` to clean whitespace issues while linting.
+- Run `cx --start` to chain the baseline automation with auto-detected project tasks—git status summaries, Node dependency installs plus lint/test scripts across `npm`/`yarn`/`pnpm`/`bun`, Ruby Bundler installs with `rspec` or rake tasks, PHP Composer installs with test scripts or `vendor/bin/phpunit`, Elixir `mix deps.get`/`mix test`, Python dependency installs via Poetry/Pipenv/pip before `tox`/`pytest` runs, `pre-commit install --install-hooks` (when git metadata is available) and `pre-commit run --all-files`, common `just` recipes (`just install`/`just lint`/`just test`) when a `Justfile` is present, Taskfile targets (`task install`/`task lint`/`task test`) when go-task is available, Bazel builds/tests via `bazel`/`bazelisk`/`./bazelw`, Pants `dependencies`/`lint`/`test` through `pants` or `./pants`, `make lint`/`make test`, `.NET` `dotnet restore`/`dotnet test`, Maven dependency warmup plus `mvn test`, Gradle `test`, Haskell `stack build --only-dependencies`/`stack test` or `cabal v2-build --only-dependencies`/`cabal v2-test`, Swift `swift package resolve`/`swift test`, Scala `sbt update`/`sbt test`, Flutter `flutter pub get`/`flutter test`, Dart `dart pub get`/`dart test`, configure/build CMake projects (`cmake -S . -B ${CX_CMAKE_BUILD_DIR:-build}` then `cmake --build`) before running `ctest`, `go test ./...`, and `cargo test`. Honor `CX_START_SKIP_INSTALL` or `CX_START_SKIP_TESTS` to suppress heavy setup steps when needed.
+- Run `cx --format` to invoke available formatters (`shfmt`, `black`, `isort`, `ruff`, `goimports`, `gofmt`, `cargo fmt`/`rustfmt`, `prettier`, `terraform fmt`, `clang-format`) against tracked files, capturing output and skip notes under `${CX_HOME:-~/.cx}/format/<project>.log`. The `--improve` and `--enhance` workflows trigger the same sweep automatically before building their reports.
+- Run `cx --depscan` to check for outdated Node (`npm`, `yarn`, `pnpm`, `bun`) and Python (Poetry, Pipenv, pip) dependencies without modifying the workspace, logging the results to `${CX_HOME:-~/.cx}/depscan/<project>.log`. The `--improve` and `--enhance` workflows call this automatically so dependency gaps appear alongside other reports.
+- Run `cx --improve` to execute the baseline suite with `--fix`, rerun the project automation with installs/tests forced on (override via `CX_IMPROVE_SKIP_INSTALL`/`CX_IMPROVE_SKIP_TESTS`), execute any newline-delimited extras from `CX_IMPROVE_EXTRA`, print git status plus `git diff --stat`, append a summary to `${CX_HOME:-~/.cx}/improve/<project>.log`, and refresh both `${CX_HOME:-~/.cx}/format/<project>.log` and `${CX_HOME:-~/.cx}/depscan/<project>.log`.
+- Run `cx --additive[=MODE]` to perform the improvement sweep and write `${CX_HOME:-~/.cx}/additive/<project>-<timestamp>.md`, combining high-priority follow-ups with module-building suggestions pulled from the module analyzer. Use `MODE=apply` to execute scaffolding during the sweep (embedding the scaffold summary in the module section) or `MODE=full` to scaffold and refresh module analysis afterward. Configure the default via `CX_ADDITIVE_MODE`; the legacy `CX_ADDITIVE_APPLY_SCAFFOLD=1` flag still forces scaffolding when you omit a mode.
+- Additive reports include a **Quick module tasks** subsection generated from the JSON snapshot saved to `${CX_HOME:-~/.cx}/modules`, giving downstream tooling (and humans) an actionable checklist; adjust `CX_MODULE_SUMMARY_LIMIT` to cap how many entries are surfaced per category.
+- Module analysis keeps `${project}-latest.json` as a baseline and blocks `--modules`/`--additive` when new gaps appear (extra missing `__init__.py` files, untested components, or oversized modules). Set `CX_MODULE_ALLOW_REGRESSION=1` after manual review to update the baseline while still logging the offending categories.
+- Use `cx --enhance` when you want the improvement sweep plus a Markdown action plan; the command respects the same `CX_IMPROVE_*` overrides, then writes `${CX_HOME:-~/.cx}/enhance/<project>-<timestamp>.md` with automation opportunities/gaps from `cx --locate`, recommended follow-up steps, and excerpts from the latest audit/inspect/hotspot/stale/format/depscan/improve logs.
+- Run `cx --backlog` to rerun the baseline suite and capture a Markdown backlog under `${CX_HOME:-~/.cx}/backlog/<project>-<timestamp>.md`, summarizing audit TODOs, churn-heavy hotspots, stale files, dependency scan notes, formatter skips, and inspection excerpts so teams can triage improvements quickly.
+- Run `cx --modules` to scan Python, Node/TypeScript, Go, and Rust layouts and write `${CX_HOME:-~/.cx}/modules/<project>-<timestamp>.md`, highlighting missing `__init__.py` files, untested components, and oversized areas ready for new modules. Append `=json` to capture the structured analysis or `=apply` to scaffold placeholders immediately (with a JSON snapshot alongside the Markdown summary), which `--additive` reuses to build the **Quick module tasks** list.
+- Module analysis now scores each component and groups opportunities into **Immediate module work**, **Plan soon**, or **Monitor for growth** buckets so additive/backlog workflows can react to high-impact gaps first. The JSON snapshot exposes these buckets under `decisions` for downstream tooling.
+- Run `cx --scaffold` to create missing `__init__.py` files and placeholder tests for those gaps, logging Markdown (and JSON snapshots) to `${CX_HOME:-~/.cx}/scaffold/<project>-<timestamp>.md` so teams can flesh out the generated stubs.
+- When iterating on CodexWrapper itself, run `./cx --improve` from the repo root inside a sandbox so every analysis stage executes against the wrapper; inspect `${CX_HOME:-~/.cx}/improve/CodexWrapper.log` to review how automation and symbol growth evolve between conversations.
+- A thorough sandbox sweep looks like: clone into an isolated worktree or container, run `./install.sh` (or `./install_venv.sh` inside an active venv), set optional overrides such as `CX_HOME=/tmp/cx-sandbox`, `CX_IMPROVE_SKIP_INSTALL=1`, `CX_IMPROVE_SKIP_TESTS=1`, or `CX_IMPROVE_EXTRA` with newline-delimited commands, execute `./cx --improve`, and compare successive entries in `${CX_HOME}/improve/CodexWrapper.log` to confirm the automation keeps progressing.
+- Override CMake defaults with `CX_CMAKE_BUILD_DIR`, `CX_CMAKE_CONFIGURE_ARGS`, `CX_CMAKE_BUILD_ARGS`, `CX_CMAKE_BUILD_TARGET`, or `CX_CTEST_ARGS` when the project needs custom generators, build flags, or alternate test invocations.
+- Customize Bazel automation with `CX_START_BAZEL_BUILD_ARGS`, `CX_START_BAZEL_BUILD_TARGETS`, `CX_START_BAZEL_TEST_ARGS`, or `CX_START_BAZEL_TEST_TARGETS`, and tune Pants commands with `CX_START_PANTS_DEPS_ARGS`, `CX_START_PANTS_DEPS_TARGETS`, `CX_START_PANTS_LINT_ARGS`, `CX_START_PANTS_LINT_TARGETS`, `CX_START_PANTS_TEST_ARGS`, or `CX_START_PANTS_TEST_TARGETS`.
+  - Append newline-delimited custom commands via `CX_START_EXTRA_INSTALL`, `CX_START_EXTRA_TEST`, or `CX_START_EXTRA_STEPS`. The install/test lists execute after the built-in actions and obey the skip flags, while the general list runs at the end regardless of skips.
+- Resolve the project root (prefer `git` metadata and common build manifests) so automation runs from the repository base even when invoked from subdirectories, and expose a `--locate` flag that reports the detected root, available ecosystem automation (including pre-commit configs, Justfile/Taskfile runners, Bazel/Pants builds, Nix flakes or shells, Terraform modules, Ansible playbooks, Docker Compose stacks, Helm charts, Kustomize overlays, and Vagrant environments), plus any missing prerequisites.
+- When Poetry, Pipenv, or pip manifests are present but the corresponding tool is missing, `--start` prints guidance so developers can install the right package manager before rerunning.
+- `--estimate` may be combined with `--dry` to show token counts alongside the expanded instruction without hitting the API.
+- Installer must avoid clobbering existing dictionaries and verify required assets before overwriting.
+- Auto-minted domain tags (e.g., @domX) should be persisted to the dictionary for reuse across sessions.
+- Wrappers may auto-load a `.cx/dict` file from the current project folder to supply domain-specific symbols automatically and honor numeric macros like `#42` defined in those dictionaries.
+- If the API key is missing, `--offline` is specified, or the network call fails, queue the prompt under `${CX_HOME:-~/.cx}/offline/<project>/<timestamp>.txt` so work can continue offline.
+- A `--replay` flag should send and remove queued prompts from project folders beneath `${CX_HOME:-~/.cx}/offline` once an API key is available.
+- Offline queues store prompts per project so ideas accumulate and can be replayed later to nurture long-term growth.
+- The Bash wrapper scans offline prompt queues and `${CX_HOME:-~/.cx}/context` logs each run to suggest new tags from recurring phrases, but periodic manual review can further refine the dictionary.
+- After each API response, append the reply to `${CX_HOME:-~/.cx}/responses/<project>.log`. At startup and after new replies, scan the entire log for recurring phrases and offer to mint new `@tag` definitions so the dictionary grows from Codex feedback over time.
+- Append every expanded prompt to `${CX_HOME:-~/.cx}/prompts/<project>.log` and scan it across runs for repeated phrases so personal instructions can become reusable tags.
+
+- When `OPENAI_API_KEY` isn't set, wrappers should prompt for it, export the key for the session, and then perform the API call, reporting HTTP errors back to the user.
+- The `cx5` compressor folds `raw=` fragments (e.g. `g:foo`, `c:bar`) into the goal or constraint lists before symbol replacement so CX5 strings encode those directives.
+
+- Wrappers accept `model=` (or `$env:CX_MODEL`) to choose the OpenAI model, defaulting to `gpt-3.5-turbo` if unspecified.
+- Wrappers accept `temp=` (or `$env:CX_TEMP`) to control sampling temperature, defaulting to `0.7`.
+
+- `install.sh` seeds `${CX_HOME:-~/.cx}` with a starter dict, metrics folder, decompression spec, and environment helpers, then installs `cx` to `${CX_BIN_DIR:-~/.local/bin}` after ensuring Python modules are present.
+- When not in `--dry` mode, wrappers post the expanded prompt to OpenAI's `chat/completions` endpoint using `OPENAI_API_KEY` and print the model reply.
