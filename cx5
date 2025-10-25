@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CX_HOME="${CX_HOME:-$HOME/.cx}"
+
+usage() {
+  cat <<'USAGE' >&2
+Usage: cx5 role=VALUE goal=VALUE [cons=VAL] [reason=VAL] [raw=VAL] [out=VAL]
+USAGE
+}
+
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      ARGS+=("$arg")
+      ;;
+  esac
+done
+
+ROLE=""
+GOAL=""
+CONS=""
+REASON=""
+RAW=""
+OUT=""
+
+for pair in "${ARGS[@]}"; do
+  key="${pair%%=*}"
+  value="${pair#*=}"
+  case "$key" in
+    role) ROLE="$value" ;;
+    goal) GOAL="$value" ;;
+    cons|constraints) CONS="$value" ;;
+    reason|reasons) REASON="$value" ;;
+    raw|R) RAW="$value" ;;
+    out|output) OUT="$value" ;;
+    *) echo "Unknown arg: $key" >&2 ;;
+  esac
+done
+
+if [[ -z "$ROLE" || -z "$GOAL" ]]; then
+  usage
+  exit 1
+fi
+
+# Load dictionary entries from $CX_HOME/dict and ./.cx/dict
+declare -A DICT INV
+load_dict() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -n "$k" ]] || continue
+    DICT["$k"]="$v"
+    INV["$v"]="$k"
+  done < "$file"
+}
+
+load_dict "$CX_HOME/dict"
+load_dict ".cx/dict"
+
+# Sort dictionary values by length for longest-first replacements
+set +u
+if [ ${#INV[@]} -gt 0 ]; then
+  mapfile -t sorted_pairs < <(
+    for v in "${!INV[@]}"; do
+      printf '%s\t%s\n' "$v" "${INV[$v]}"
+    done | awk -F'\t' '{print length($1)"\t"$1"\t"$2}' | sort -nr | cut -f2-)
+else
+  sorted_pairs=()
+fi
+set -u
+
+replace_with_symbols() {
+  local text="$1"
+  local pair val key esc
+  for pair in "${sorted_pairs[@]}"; do
+    IFS=$'\t' read -r val key <<<"$pair"
+    esc=$(printf '%s' "$val" | sed -e 's/[.[\\*^$&/]/\\&/g')
+    text=$(printf '%s' "$text" | sed -e "s/$esc/$key/g")
+  done
+  printf '%s' "$text"
+}
+
+# Expand ^st{N} to ^stN before compression
+global_expand_st() {
+  printf '%s' "$1" | sed -E 's/\^st\{([0-9]+)\}/^st\1/g'
+}
+
+# Normalize comma spacing
+global_norm_commas() {
+  printf '%s' "$1" | sed -E 's/ *, */,/g; s/,/, /g'
+}
+
+ROLE=$(global_expand_st "$ROLE")
+GOAL=$(global_expand_st "$GOAL")
+CONS=$(global_expand_st "$CONS")
+REASON=$(global_expand_st "$REASON")
+OUT=$(global_expand_st "$OUT")
+RAW=$(global_expand_st "$RAW")
+
+if [[ -n "$RAW" ]]; then
+  IFS=';' read -ra RAW_PARTS <<< "$RAW"
+  for part in "${RAW_PARTS[@]}"; do
+    part=$(printf '%s' "$part" | xargs)
+    case "$part" in
+      g:*|goal:*)
+        part=${part#*:}
+        GOAL="${GOAL}${GOAL:+, }$part"
+        ;;
+      c:*|cons:*)
+        part=${part#*:}
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+      *)
+        CONS="${CONS}${CONS:+, }$part"
+        ;;
+    esac
+  done
+  RAW=""
+fi
+
+ROLE=$(replace_with_symbols "$ROLE")
+GOAL=$(replace_with_symbols "$GOAL")
+CONS=$(replace_with_symbols "$CONS")
+REASON=$(replace_with_symbols "$REASON")
+OUT=$(replace_with_symbols "$OUT")
+
+GOAL=$(global_norm_commas "$GOAL")
+CONS=$(global_norm_commas "$CONS")
+REASON=$(global_norm_commas "$REASON")
+
+F="∫($ROLE ⊕ goal($GOAL)"
+[[ -n "$CONS" ]] && F+=" ⊕ d[$CONS]"
+[[ -n "$REASON" ]] && F+=" ⊕ Π{$REASON}"
+F+=")"
+
+printf 'CX5|v=1|Σ=|F=%s|R=%s|O=%s\n' "$F" "$RAW" "$OUT"
